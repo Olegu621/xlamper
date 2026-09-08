@@ -28,7 +28,6 @@ start:
     gstore 3
     push 0
     gstore 5
-    push 0
     load K1 0
     gstore 4
 
