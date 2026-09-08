@@ -93,10 +93,18 @@ class Display:
                     self.setpixel(x, y, c)
 
     def render(self) -> str:
+        """Точный рендер 1:1 — по строкам (64 строки по 128 символов)."""
+        return '\n'.join(
+            ''.join('#' if self.px[y][x] else '.' for x in range(W))
+            for y in range(H)
+        )
+
+    def render_half(self) -> str:
+        """Сжатый рендер: 32 строки (пары пиксельных строк через OR)."""
         rows = []
-        for band in (0, 8, 16, 24, 32, 40, 48, 56):
+        for band in range(0, H, 2):
             rows.append(''.join(
-                '#' if any(self.px[y][x] for y in range(band, band + 8)) else '.'
+                '#' if (self.px[band][x] or self.px[band + 1][x]) else '.'
                 for x in range(W)))
         return '\n'.join(rows)
 
@@ -264,6 +272,17 @@ class Sim:
                 if idx >= len(self.data):
                     raise VMError('g OOB')
                 self.push(self.data[idx])
+            elif op == 0x47:
+                idx = self.pop()
+                v = self.pop()
+                if idx < 0 or idx >= len(self.data):
+                    raise VMError('g OOB')
+                self.data[idx] = v
+            elif op == 0x48:
+                idx = self.pop()
+                if idx < 0 or idx >= len(self.data):
+                    raise VMError('g OOB')
+                self.push(self.data[idx])
             elif op == 0x50:
                 rel = self.s16()
                 self.pc = _w(self.pc + rel) & 0xFFFF
@@ -348,12 +367,21 @@ class Sim:
             elif op == 0x76:
                 v = self.pop()
                 self.logs.append(f'log({v})')
+            elif op == 0x77:
+                v = self.pop()
+                f = self.pop()
+                y = self.pop()
+                x = self.pop()
+                self.disp.cx, self.disp.cy, self.disp.size = x, y, f
+                self._text(str(v))
             elif op == 0x80:
                 self.push(0)   # stx центр
             elif op == 0x81:
                 self.push(0)
             elif op == 0x82:
-                self.push(-1)  # idle
+                # стик: маппинг события -> 8-way (0 up, 2 right, 4 down, 6 left); idle -> -1
+                evmap = {1: 0, 2: 4, 3: 6, 4: 2}   # ev: 1 up, 2 down, 3 left, 4 right
+                self.push(evmap.get(self.ev, -1))
             elif op == 0x83:
                 self.push(self.ev)
             elif op == 0x84:
