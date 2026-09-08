@@ -543,7 +543,7 @@ gr_sc:
 
 hud_end:
     ; hold=exit снизу
-    text 96 55 1 SA
+    text 61 55 1 SA
     disp
     jmp main_loop
 
