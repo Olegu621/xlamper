@@ -44,19 +44,19 @@ OP = {
     'neg':    0x25, 'min': 0x26, 'max': 0x27, 'abs': 0x28,
     'eq':     0x30, 'ne':  0x31, 'lt':  0x32, 'le':  0x33, 'gt':  0x34, 'ge': 0x35,
     'and':    0x36, 'or':  0x37, 'xor': 0x38, 'not': 0x39,
-    'gstore': 0x45, 'gload': 0x46,
+    'gstore': 0x45, 'gload': 0x46, 'gstorei': 0x47, 'gloadi': 0x48,
     'jmp':    0x50, 'jz': 0x51, 'jnz': 0x52, 'call': 0x53, 'ret': 0x54,
     'frame':  0x5F,
     'px':     0x60, 'line': 0x61, 'rect': 0x62, 'frect': 0x63,
     'circ':   0x64, 'fcirc': 0x65, 'ell': 0x66, 'text': 0x67,
     'inv':    0x68, 'fill': 0x69, 'cls': 0x6A, 'disp': 0x6B,
     'msec':   0x70, 'rand': 0x71, 'beep': 0x72, 'exit': 0x73,
-    'save':   0x74, 'load': 0x75, 'log': 0x76,
+    'save':   0x74, 'load': 0x75, 'log': 0x76, 'num': 0x77,
     'stx':    0x80, 'sty': 0x81, 'stick': 0x82, 'event': 0x83, 'hold': 0x84,
     'sin':    0x90, 'cos': 0x91, 'sqrt': 0x92,
 }
 
-# мнемоники, требующие imm16-операнд (кроме push/pushstr/gstore/gload — особые)
+# мнемоники, требующие imm16-операнд (кроме push/pushstr — особые)
 IMM16 = {'gstore', 'gload'}
 # мнемоники со строковым операндом (строковый индекс)
 STROPS = {'text', 'save', 'load'}
