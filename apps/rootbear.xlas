@@ -1,0 +1,883 @@
+; ==================================================================
+; ROOT BEAR — бар root beer для C3 XLAMPER (XLA VM v2)
+; ==================================================================
+; Клиенты-зверята заказывают кружку root beer.
+;   Стик <- ->  : наклон кувшина (0..3) — поток налива
+;   Стик up/down: высота кувшина над кружкой — пена (больше высота = больше пены)
+;   Клик        : подать кружку / следующий клиент
+;   Удержание   : выход
+; Оценка: |fill - target| <= 5 -> PERFECT (+3, streak)
+;         |fill - target| <= 15 -> GOOD (+1)
+;         иначе BAD (streak=0)
+; Серия PERFECT x2+ даёт бонус. Рекорд в NVS.
+; ==================================================================
+.title ROOTBEAR
+.data 40
+; g0=fill     уровень кружки (0..100)
+; g1=foam     пена (0..100)
+; g2=tilt     наклон кувшина 0..3
+; g3=lvl      высота кувшина 0..3
+; g4=score
+; g5=best
+; g6=state 0=order,1=pour,2=grade
+; g7=target   цель заказа 30..80
+; g8=streak
+; g9=animT
+; g10=customer 0..3 (мишка/зайка/котик/утка)
+; g11=rounds
+; g12..g15: пузыри пены (фазы)
+; g16=spill   брызги счётчик
+; g17=serveAnim
+
+.str S1 ROOT BEAR
+.str S2 ORDER:
+.str S3 FILL
+.str S4 PERFECT!
+.str S5 GOOD
+.str S6 BAD...
+.str S7 SC
+.str S8 BEST
+.str S9 click=serve
+.str SA hold=exit
+.str SB STREAK
+.str K1 best
+
+; ================= init =================
+start:
+    push 0
+    gstore 0
+    push 0
+    gstore 1
+    push 0
+    gstore 2
+    push 1
+    gstore 3
+    push 0
+    gstore 4
+    push 0
+    gstore 8
+    push 0
+    gstore 11
+    push 0
+    gstore 16
+    load K1 0
+    gstore 5
+    call new_order
+
+; ================= main loop =================
+main_loop:
+    frame
+
+    ; ---- input: tilt (left/right) ----
+    stick
+    dup
+    push 2
+    eq
+    jnz in_tilt_up
+    dup
+    push 6
+    eq
+    jnz in_tilt_dn
+    dup
+    push 0
+    eq
+    jnz in_h_up
+    dup
+    push 4
+    eq
+    jnz in_h_dn
+    drop
+    jmp in_done
+in_tilt_up:
+    drop
+    gload 2
+    push 3
+    lt
+    jz tilt_cap
+    gload 2
+    push 1
+    add
+    gstore 2
+tilt_cap:
+    jmp in_done
+in_tilt_dn:
+    drop
+    gload 2
+    jz tilt_floor
+    gload 2
+    push 1
+    sub
+    gstore 2
+tilt_floor:
+    jmp in_done
+in_h_up:
+    drop
+    gload 3
+    push 3
+    lt
+    jz h_cap
+    gload 3
+    push 1
+    add
+    gstore 3
+h_cap:
+    jmp in_done
+in_h_dn:
+    drop
+    gload 3
+    push 1
+    gt
+    jz h_floor
+    gload 3
+    push 1
+    sub
+    gstore 3
+h_floor:
+in_done:
+
+    ; ---- events ----
+    event
+    dup
+    push 6
+    eq
+    jnz ev_exit
+    dup
+    push 5
+    eq
+    jnz ev_click
+    drop
+    jmp physics
+
+ev_exit:
+    drop
+    exit
+
+ev_click:
+    drop
+    gload 6
+    jz a_pour
+    gload 6
+    push 1
+    eq
+    jnz a_serve
+    ; state==2 -> next customer
+    call new_order
+    jmp physics
+
+a_pour:
+    push 1
+    gstore 6
+    beep 900 60
+    jmp physics
+
+a_serve:
+    call grade
+    jmp physics
+
+; ================= physics =================
+physics:
+    gload 6
+    push 1
+    eq
+    jnz pouring
+    msec
+    push 200
+    mod
+    gstore 9
+    jmp draw
+
+pouring:
+    ; поток: fill += tilt*3
+    gload 0
+    gload 2
+    push 3
+    mul
+    add
+    dup
+    push 100
+    gt
+    jz cap_f
+    drop
+    push 100
+cap_f:
+    gstore 0
+    ; пена: пропорционально высоте и потоку
+    gload 1
+    gload 3
+    push 2
+    mul
+    add
+    dup
+    push 100
+    gt
+    jz cap_fm
+    drop
+    push 100
+cap_fm:
+    gstore 1
+    ; брызги при tilt==3
+    gload 2
+    push 3
+    eq
+    jnz do_spill
+    push 0
+    gstore 16
+    jmp phys_done
+do_spill:
+    gload 16
+    push 1
+    add
+    gstore 16
+phys_done:
+    msec
+    push 100
+    mod
+    gstore 9
+
+; ================= draw =================
+draw:
+    cls
+
+    ; ---- шапка ----
+    text 0 0 1 S1
+    push 88
+    push 12
+    push 1
+    gload 4
+    num
+
+    ; ---- клиент (слева, большое окно 4..52 x 18..62) ----
+    call draw_customer
+
+    ; ---- заказ ----
+    text 4 14 1 S2
+    push 46
+    push 14
+    push 1
+    gload 7
+    num
+    text 4 24 1 S3
+    push 40
+    push 24
+    push 1
+    gload 0
+    num
+
+    ; ---- кружка (справа) ----
+    push 78
+    push 40
+    push 22
+    push 18
+    push 1
+    rect
+    ; ручка
+    push 100
+    push 43
+    push 3
+    push 8
+    push 1
+    rect
+    ; beer-уровень: h = fill*14/100
+    gload 0
+    push 14
+    mul
+    push 100
+    div
+    gstore 12
+    ; beer-блок: y = 55-h .. 55
+    gload 12
+    jz beer_none
+    push 55
+    gload 12
+    sub
+    gstore 13
+    ; рисуем колонками: x 80..98, y g13..55
+    push 80
+    gstore 14
+beer_x:
+    gload 14
+    push 98
+    le
+    jnz beer_y
+    jmp beer_done
+beer_y:
+    gload 13
+    gstore 15
+beer_y_l:
+    gload 15
+    push 55
+    le
+    jnz beer_p
+    gload 14
+    push 1
+    add
+    gstore 14
+    jmp beer_x
+beer_p:
+    gload 14
+    gload 15
+    push 1
+    px
+    gload 15
+    push 1
+    add
+    gstore 15
+    jmp beer_y_l
+beer_none:
+beer_done:
+    ; пена сверху пива
+    gload 1
+    jz foam_none
+    ; y = 54 - 2
+    push 52
+    push 52
+    sub
+    ; нет: пена y = (55 - h - 3) .. просто 2 ряда
+    gload 1
+    push 4
+    div
+    gstore 15
+foam_row:
+    gload 15
+    jz foam_none
+    push 80
+    gstore 14
+foam_x:
+    gload 14
+    push 98
+    le
+    jnz foam_p
+    gload 15
+    push 1
+    sub
+    gstore 15
+    jmp foam_row
+foam_p:
+    msec
+    push 3
+    add
+    gload 14
+    push 3
+    mul
+    add
+    push 6
+    mod
+    jz foam_hole
+    gload 14
+    push 51
+    gload 15
+    sub
+    push 1
+    px
+    jmp foam_next
+foam_hole:
+foam_next:
+    gload 14
+    push 1
+    add
+    gstore 14
+    jmp foam_x
+foam_none:
+
+    ; ---- кувшин (над кружкой, высота g3, наклон g2) ----
+    ; кувшин: x = 82 + tilt*4, y = 22 - lvl*4
+    push 82
+    gload 2
+    push 4
+    mul
+    add
+    gstore 17
+    push 22
+    gload 3
+    push 4
+    mul
+    sub
+    gstore 16
+    ; корпус кувшина 10x8
+    gload 17
+    gload 16
+    push 10
+    push 8
+    push 1
+    rect
+    ; ручка кувшина (правая стенка)
+    gload 17
+    push 10
+    add
+    gload 16
+    push 2
+    add
+    push 3
+    push 4
+    push 1
+    rect
+    ; stream (только при наливе)
+    gload 6
+    push 1
+    eq
+    jnz stream_on
+    jmp mug_back
+stream_on:
+    ; струя: от (g17+5, g16+8) вниз к пене, с изгибом по tilt
+    gload 17
+    push 5
+    add
+    gstore 14
+    gload 16
+    push 8
+    add
+    gstore 15
+    ; 3 сегмента струи
+    push 0
+    gstore 12
+stream_seg:
+    gload 12
+    push 3
+    lt
+    jnz stream_p
+    jmp stream_done
+stream_p:
+    gload 14
+    gload 15
+    push 1
+    px
+    ; x сдвигается по наклону
+    gload 14
+    gload 2
+    push 2
+    sub
+    add
+    gstore 14
+    gload 15
+    push 4
+    add
+    gstore 15
+    gload 12
+    push 1
+    add
+    gstore 12
+    jmp stream_seg
+stream_done:
+    ; брызги при tilt==3
+    gload 2
+    push 3
+    eq
+    jnz spill_px
+    jmp mug_back
+spill_px:
+    msec
+    push 250
+    mod
+    push 2
+    mul
+    push 88
+    add
+    gstore 12
+    gload 12
+    push 49
+    push 1
+    px
+    gload 12
+    push 4
+    add
+    push 50
+    push 1
+    px
+mug_back:
+
+    ; ---- состояние-подсказки ----
+    gload 6
+    jz hint_order
+    gload 6
+    push 1
+    eq
+    jnz hint_pour
+    jmp grade_show
+hint_order:
+    text 4 55 1 S9
+    jmp hud_end
+hint_pour:
+    text 4 55 1 S9
+    jmp hud_end
+
+grade_show:
+    ; ---- экран оценки ----
+    push 14
+    push 12
+    push 100
+    push 40
+    push 1
+    rect
+    text 24 16 1 S1
+    gload 18
+    jz gr_good
+    ; PERFECT
+    text 40 30 1 S4
+    gload 8
+    push 2
+    ge
+    jnz streak_show
+    jmp gr_sc
+streak_show:
+    text 34 42 1 SB
+    push 70
+    push 42
+    push 1
+    gload 8
+    num
+    jmp gr_sc
+gr_good:
+    gload 19
+    jz gr_bad
+    text 40 30 1 S5
+    jmp gr_sc
+gr_bad:
+    text 40 30 1 S6
+gr_sc:
+    text 24 46 1 S7
+    push 44
+    push 46
+    push 1
+    gload 4
+    num
+
+hud_end:
+    ; hold=exit снизу
+    text 96 55 1 SA
+    disp
+    jmp main_loop
+
+; ================= subroutines =================
+new_order:
+    push 0
+    gstore 0
+    push 0
+    gstore 1
+    push 0
+    gstore 2
+    push 1
+    gstore 3
+    push 0
+    gstore 6
+    push 0
+    gstore 16
+    ; цель 30..80
+    push 51
+    rand
+    push 30
+    add
+    gstore 7
+    ; клиент 0..3
+    push 4
+    rand
+    gstore 10
+    ; rounds++
+    gload 11
+    push 1
+    add
+    gstore 11
+    ret
+
+grade:
+    ; diff = fill - target
+    gload 0
+    gload 7
+    sub
+    ; |diff|
+    dup
+    push 0
+    lt
+    jnz neg_d
+    jmp abs_d
+neg_d:
+    push -1
+    mul
+abs_d:
+    ; diff на стеке
+    push 5
+    le
+    jnz g_perf
+    ; not perfect: снова посчитать |diff| (уже снято) — пересчитываем
+    gload 0
+    gload 7
+    sub
+    dup
+    push 0
+    lt
+    jnz neg_d2
+    jmp abs_d2
+neg_d2:
+    push -1
+    mul
+abs_d2:
+    push 15
+    le
+    jnz g_good
+    ; BAD
+    push 0
+    gstore 8
+    push 0
+    gstore 18
+    push 0
+    gstore 19
+    push 2
+    gstore 6
+    beep 220 300
+    ret
+g_perf:
+    push 3
+    gstore 18
+    push 0
+    gstore 19
+    gload 4
+    push 3
+    add
+    gstore 4
+    gload 8
+    push 1
+    add
+    gstore 8
+    gload 4
+    gload 5
+    gt
+    jz g_pnb
+    gload 4
+    gstore 5
+    gload 5
+    save K1
+g_pnb:
+    push 2
+    gstore 6
+    beep 1600 120
+    ret
+g_good:
+    push 0
+    gstore 18
+    push 1
+    gstore 19
+    gload 4
+    push 1
+    add
+    gstore 4
+    push 2
+    gstore 6
+    beep 1100 100
+    ret
+
+; ---- клиенты: g10: 0 медвежонок, 1 зайчик, 2 котик, 3 утка ----
+draw_customer:
+    ; голова: круг
+    gload 10
+    jnz c_not_bear
+    ; МЕДВЕЖОНОК: голова+уши+морда
+    push 20
+    push 34
+    push 9
+    push 1
+    fcirc
+    push 13
+    push 26
+    push 3
+    push 1
+    fcirc
+    push 27
+    push 26
+    push 3
+    push 1
+    fcirc
+    push 17
+    push 32
+    push 1
+    push 1
+    fcirc
+    push 23
+    push 32
+    push 1
+    push 1
+    fcirc
+    push 20
+    push 37
+    push 3
+    push 1
+    fcirc
+    ; тельце
+    push 20
+    push 52
+    push 8
+    push 10
+    push 1
+    ell
+    ret
+c_not_bear:
+    gload 10
+    push 1
+    eq
+    jnz c_bunny
+    gload 10
+    push 2
+    eq
+    jnz c_cat
+    jmp c_duck
+c_bunny:
+    ; ЗАЙКА: длинные уши
+    push 20
+    push 32
+    push 8
+    push 1
+    fcirc
+    push 15
+    push 22
+    push 2
+    push 8
+    push 1
+    ell
+    push 25
+    push 22
+    push 2
+    push 8
+    push 1
+    ell
+    push 17
+    push 30
+    push 1
+    push 1
+    fcirc
+    push 23
+    push 30
+    push 1
+    push 1
+    fcirc
+    push 20
+    push 38
+    push 2
+    push 1
+    fcirc
+    push 20
+    push 52
+    push 8
+    push 9
+    push 1
+    ell
+    ret
+c_cat:
+    ; КОТИК: треугольные уши
+    push 20
+    push 32
+    push 8
+    push 1
+    fcirc
+    ; уши-треугольники (пикселями)
+    push 14
+    push 28
+    push 1
+    px
+    push 15
+    push 27
+    push 1
+    px
+    push 16
+    push 26
+    push 1
+    px
+    push 17
+    push 26
+    push 1
+    px
+    push 18
+    push 27
+    push 1
+    px
+    push 19
+    push 28
+    push 1
+    px
+    push 22
+    push 28
+    push 1
+    px
+    push 23
+    push 27
+    push 1
+    px
+    push 24
+    push 26
+    push 1
+    px
+    push 25
+    push 26
+    push 1
+    px
+    push 26
+    push 27
+    push 1
+    px
+    push 27
+    push 28
+    push 1
+    px
+    push 17
+    push 30
+    push 1
+    push 1
+    fcirc
+    push 23
+    push 30
+    push 1
+    push 1
+    fcirc
+    push 20
+    push 36
+    push 2
+    push 1
+    fcirc
+    ; усы
+    push 14
+    push 34
+    push 16
+    push 34
+    push 1
+    line
+    push 24
+    push 34
+    push 26
+    push 34
+    push 1
+    line
+    push 20
+    push 52
+    push 8
+    push 9
+    push 1
+    ell
+    ret
+c_duck:
+    ; УТКА: клюв
+    push 20
+    push 32
+    push 8
+    push 1
+    fcirc
+    push 17
+    push 30
+    push 1
+    push 1
+    fcirc
+    push 23
+    push 30
+    push 1
+    push 1
+    fcirc
+    ; клюв
+    push 26
+    push 35
+    push 3
+    push 2
+    push 1
+    ell
+    push 20
+    push 52
+    push 8
+    push 10
+    push 1
+    ell
+    ret
