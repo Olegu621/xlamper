@@ -13,7 +13,8 @@
 .str T2 PERFECT!
 .str T3 GOOD
 .str T4 BAD...
-.str T5 click:pour hold:exit
+.str T5 click=pour
+.str TH hold=exit
 .str K1 best
 
 ; ================= init =================
@@ -621,6 +622,7 @@ gr_sc:
 
 hud:
     text 4 55 1 T5
+    text 66 55 1 TH
     text 24 16 1 T1
 
 finish_frame:
