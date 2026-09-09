@@ -1,0 +1,390 @@
+; ==================================================================
+; PONG vs CPU — облако-версия для C3 XLAMPER (XLA VM v2)
+; Мяч, 2 ракетки, счёт до 7. Управление: стик вверх/вниз, клик = подача.
+; ==================================================================
+.title PONG
+.data 16
+; g0=ballX g1=ballY g2=vx g3=vy g4=plY g5=cpuY g6=plScore g7=cpuScore
+; g8=tMove g9=serving
+
+.str T1 CLICK
+.str T2 CPU
+.str T3 YOU
+
+; ================= start =================
+start:
+    push 60
+    gstore 0
+    push 32
+    gstore 1
+    push 2
+    gstore 2
+    push 1
+    gstore 3
+    push 28
+    gstore 4
+    push 28
+    gstore 5
+    push 0
+    gstore 6
+    push 0
+    gstore 7
+    push 1
+    gstore 9
+
+; ================= main loop =================
+main_loop:
+    frame
+    event
+    dup
+    push 6
+    eq
+    jnz do_exit
+    dup
+    push 5
+    eq
+    jnz do_click
+    drop
+    jmp input
+
+do_click:
+    drop
+    gload 9
+    jz input               ; не в подаче — ничего
+    push 0
+    gstore 9               ; ПОДАЧА!
+    beep 1200 30
+    jmp input
+
+do_exit:
+    drop
+    exit
+
+; ---- input: стик up/down ----
+input:
+    stick
+    dup
+    push 0
+    eq
+    jnz pl_up
+    dup
+    push 4
+    eq
+    jnz pl_down
+    drop
+    jmp cpu
+pl_up:
+    drop
+    gload 4
+    push 2
+    gt
+    jnz pl_do_up
+    jmp cpu
+pl_do_up:
+    gload 4
+    push 2
+    sub
+    gstore 4
+    jmp cpu
+pl_down:
+    drop
+    gload 4
+    push 38
+    lt
+    jnz pl_do_dn
+    jmp cpu
+pl_do_dn:
+    gload 4
+    push 2
+    add
+    gstore 4
+
+; ---- CPU AI: центр ракетки тянется к мячу ----
+cpu:
+    msec
+    push 2
+    mod
+    jz cpu_think
+    jmp ball
+cpu_think:
+    gload 5
+    push 5
+    add                 ; cpuY+5 (центр ракетки)
+    gload 1             ; ballY
+    sub                 ; diff = центр - мяч (>0: ракетка НИЖЕ)
+    dup
+    push 3
+    gt
+    jnz cpu_up
+    dup
+    push -3
+    lt
+    jnz cpu_down
+    drop
+    jmp ball
+cpu_up:                 ; ракетка ниже мяча -> вверх (y меньше)
+    drop
+    gload 5
+    push 2
+    sub
+    push 2
+    max
+    push 38
+    min
+    gstore 5
+    jmp ball
+cpu_down:               ; ракетка выше мяча -> вниз (y больше)
+    drop
+    gload 5
+    push 2
+    add
+    push 2
+    max
+    push 38
+    min
+    gstore 5
+
+; ---- мяч: раз в 40 мс ----
+ball:
+    msec
+    gload 8
+    sub
+    push 40
+    ge
+    jnz ball_move
+    jmp draw
+ball_move:
+    msec
+    gstore 8
+    gload 9
+    jnz draw               ; ждём подачи — мяч стоит
+
+    gload 0
+    gload 2
+    add
+    gstore 0
+    gload 1
+    gload 3
+    add
+    gstore 1
+
+    ; отскок верх/низ
+    gload 1
+    push 2
+    le
+    jnz bounce_y
+    gload 1
+    push 46
+    ge
+    jnz bounce_y
+    jmp chk_pl
+bounce_y:
+    gload 3
+    push -1
+    mul
+    gstore 3
+
+    ; ---- ракетка игрока (x=2..4) ----
+chk_pl:
+    gload 0
+    push 5
+    le
+    jnz pl_y
+    jmp chk_cpu
+pl_y:
+    gload 1
+    gload 4
+    push 5
+    add
+    sub                ; diff = ballY - (plY+5)
+    dup
+    push -6
+    lt                ; diff < -6 -> miss
+    jnz pl_miss
+    dup
+    push 6
+    gt                ; diff > 6 -> miss
+    jnz pl_miss
+    drop               ; HIT: diff не нужен
+    push 3
+    gstore 2
+    gload 1
+    gload 4
+    push 5
+    add
+    sub                ; rel: -5..5
+    push -1
+    mul
+    push -3
+    max
+    push 3
+    min
+    gstore 3
+    beep 1200 25
+    jmp chk_cpu
+pl_miss:
+    drop
+    jmp chk_cpu
+
+    ; ---- ракетка CPU (x=123..125) ----
+chk_cpu:
+    gload 0
+    push 122
+    ge
+    jnz cpu_y
+    jmp chk_goals
+cpu_y:
+    gload 1
+    gload 5
+    push 5
+    add
+    sub                ; diff = ballY - (cpuY+5)
+    dup
+    push -6
+    lt
+    jnz cpu_miss
+    dup
+    push 6
+    gt
+    jnz cpu_miss
+    drop               ; HIT
+    push -3
+    gstore 2
+    gload 1
+    gload 5
+    push 5
+    add
+    sub
+    push -1
+    mul
+    push -3
+    max
+    push 3
+    min
+    gstore 3
+    beep 1000 25
+    jmp chk_goals
+cpu_miss:
+    drop
+    jmp chk_goals
+
+    ; ---- голы ----
+chk_goals:
+    gload 0
+    push -3
+    le
+    jnz goal_cpu
+    gload 0
+    push 130
+    ge
+    jnz goal_pl
+    jmp draw
+goal_pl:                ; игрок забил (мяч ушёл вправо)
+    gload 6
+    push 1
+    add
+    gstore 6
+    beep 1600 80
+    push 1
+    gstore 9           ; подача
+    push 60
+    gstore 0
+    push 32
+    gstore 1
+    push 2             ; после гола CPU — к игроку
+    gstore 2
+    push 1
+    gstore 3
+    jmp draw
+goal_cpu:               ; CPU забил
+    gload 7
+    push 1
+    add
+    gstore 7
+    beep 300 120
+    push 1
+    gstore 9
+    push 60
+    gstore 0
+    push 32
+    gstore 1
+    push -2            ; к CPU
+    gstore 2
+    push 1
+    gstore 3
+
+; ================= draw =================
+draw:
+    cls
+    ; центральная линия
+    push 63
+    push 0
+    push 63
+    push 47
+    push 1
+    line
+    ; ракетки
+    push 2
+    gload 4
+    push 2
+    push 10
+    push 1
+    frect
+    push 124
+    gload 5
+    push 2
+    push 10
+    push 1
+    frect
+    ; мяч
+    gload 0
+    gload 1
+    push 3
+    push 1
+    fcirc
+    ; счёт
+    push 20
+    push 2
+    push 1
+    gload 6
+    num
+    push 96
+    push 2
+    push 1
+    gload 7
+    num
+    ; подача
+    gload 9
+    jz no_serve
+    text 38 22 1 T1
+no_serve:
+    ; победа
+    gload 6
+    push 7
+    ge
+    jnz win
+    gload 7
+    push 7
+    ge
+    jnz lose
+    jmp dd
+win:
+    push 28
+    push 18
+    push 72
+    push 12
+    push 1
+    frect
+    text 42 20 1 T3
+    jmp dd
+lose:
+    push 28
+    push 18
+    push 72
+    push 12
+    push 1
+    frect
+    text 44 20 1 T2
+dd:
+    disp
+    jmp main_loop
