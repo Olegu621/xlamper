@@ -1,0 +1,510 @@
+; ==================================================================
+; SNAKE — облако-версия для C3 XLAMPER (XLA VM v2)
+; Канвас 128x48 (синяя зона). Клетки 3x3: 42 колонок x 15 строк.
+; Тело — массив клеток g[100+i] = x + 42*y (i=0 голова).
+; Стик = направление, удержание = выход. Съел еду +1, растём.
+; ==================================================================
+.title SNAKE
+.data 600
+; g0=len g1=dir g2=moveT g3=score g4=alive g5=foodX g6=foodY
+; g7=iter g8=tmpA g9=tmpB g10=moveMs g11=best g12=prevDir
+; g[100..199] тело (клетки), g[13]=delayMs
+
+.str S1 SNAKE
+.str S2 SC
+.str S3 BEST
+.str S4 GAME OVER
+.str K1 best
+
+; ================= init =================
+start:
+    push 3
+    gstore 0            ; len=3
+    push 1
+    gstore 1            ; dir=1 (вправо)
+    push 1
+    gstore 12           ; prevDir=1
+    push 0
+    gstore 3            ; score
+    push 1
+    gstore 4            ; alive
+    push 260
+    gstore 13           ; moveMs (ускоряется)
+    load K1 0
+    gstore 11
+    ; тело: голова (5,7), (4,7), (3,7) — клетка = 42*y+x
+    push 7
+    push 42
+    mul
+    push 5
+    add
+    gstore 100
+    push 7
+    push 42
+    mul
+    push 4
+    add
+    gstore 101
+    push 7
+    push 42
+    mul
+    push 3
+    add
+    gstore 102
+    call place_food
+    msec
+    gstore 2
+
+; ================= main =================
+main:
+    frame
+    event
+    dup
+    push 6
+    eq
+    jnz do_exit
+    drop
+    jmp input
+
+do_exit:
+    drop
+    ; рекорд
+    gload 3
+    gload 11
+    gt
+    jnz save_best
+    jmp fin
+save_best:
+    gload 3
+    save K1
+    gload 3
+    gstore 11
+fin:
+    exit
+
+; ================= input =================
+input:
+    stick
+    dup
+    push 0
+    eq
+    jnz in_up
+    dup
+    push 2
+    eq
+    jnz in_rt
+    dup
+    push 4
+    eq
+    jnz in_dn
+    dup
+    push 6
+    eq
+    jnz in_lf
+    drop
+    jmp timing
+in_up:
+    drop
+    gload 1
+    push 2
+    eq
+    jnz timing          ; не разворот
+    gload 4
+    jnz set_up          ; после смерти стик игнорируем
+    jmp timing
+set_up:
+    push 0
+    gstore 12
+    jmp timing
+in_rt:
+    drop
+    gload 1
+    push 3
+    eq
+    jnz timing
+    gload 4
+    jnz set_rt
+    jmp timing
+set_rt:
+    push 1
+    gstore 12
+    jmp timing
+in_dn:
+    drop
+    gload 1
+    push 0
+    eq
+    jnz timing
+    gload 4
+    jnz set_dn
+    jmp timing
+set_dn:
+    push 2
+    gstore 12
+    jmp timing
+in_lf:
+    drop
+    gload 1
+    push 1
+    eq
+    jnz timing
+    gload 4
+    jnz set_lf
+    jmp timing
+set_lf:
+    push 3
+    gstore 12
+    jmp timing
+
+; ================= timing =================
+timing:
+    gload 4
+    jz draw              ; мертвы — только рисуем
+    msec
+    gload 2
+    sub
+    gload 13
+    ge
+    jnz step
+    jmp draw
+
+; ================= step: сдвиг =================
+step:
+    ; применяем dir (не разворот проверен при вводе)
+    gload 12
+    gstore 1
+    msec
+    gstore 2
+    ; тело сдвигается ПОЗЖЕ (в shift_ok) — здесь только новая голова
+new_head:
+    ; новая голова по dir
+    gload 100           ; клетка головы
+    push 42
+    div
+    gstore 9            ; hy
+    gload 100
+    push 42
+    gload 9
+    mul
+    sub
+    gstore 8            ; hx
+    ; dir 0 up: hy-1; 1 rt: hx+1; 2 dn: hy+1; 3 lf: hx-1
+    gload 1
+    jz d_up
+    gload 1
+    push 1
+    sub
+    jz d_rt
+    gload 1
+    push 2
+    sub
+    jz d_dn
+d_lf:
+    gload 8
+    push 1
+    sub
+    gstore 8
+    jmp head_chk
+d_up:
+    gload 9
+    push 1
+    sub
+    gstore 9
+    jmp head_chk
+d_rt:
+    gload 8
+    push 1
+    add
+    gstore 8
+    jmp head_chk
+d_dn:
+    gload 9
+    push 1
+    add
+    gstore 9
+head_chk:
+    ; стены
+    gload 8
+    push 0
+    lt
+    jnz die
+    gload 8
+    push 41
+    gt
+    jnz die
+    gload 9
+    push 0
+    lt
+    jnz die
+    gload 9
+    push 14
+    gt
+    jnz die
+    ; самопересечение: сравнить с телом g[100..len-1]
+    ; клетка = 42*y+x (row-major, как в init и draw)
+    gload 9
+    push 42
+    mul
+    gload 8
+    add
+    gstore 7            ; новая клетка
+    push 0
+    gstore 8            ; i
+self_loop:
+    gload 8
+    gload 0
+    ge
+    jnz self_ok
+    push 100
+    gload 8
+    add
+    gloadi
+    gload 7
+    eq
+    jnz die
+    gload 8
+    push 1
+    add
+    gstore 8
+    jmp self_loop
+self_ok:
+    ; влезаем: сдвиг тела (gcpy src=100 dst=101 n=len-1), затем голова
+    gload 0
+    push 1
+    sub
+    gstore 8
+    gload 8
+    push 0
+    gt
+    jnz shift_ok
+    jmp set_head
+shift_ok:
+    push 100
+    push 101
+    gload 8
+    gcpy
+set_head:
+    gload 7
+    gstore 100
+    ; еда? голова = 42*y+x
+    gload 100
+    push 42
+    div
+    gstore 9            ; hy
+    gload 100
+    push 42
+    gload 9
+    mul
+    sub
+    gstore 8            ; hx
+    gload 8
+    gload 5
+    eq
+    jnz chk2
+    jmp step_done
+chk2:
+    gload 9
+    gload 6
+    eq
+    jnz eat
+    jmp step_done
+eat:
+    ; len+1, score+1, новая еда, скорость
+    gload 0
+    push 1
+    add
+    gstore 0
+    gload 3
+    push 1
+    add
+    gstore 3
+    beep 1400 40
+    gload 13
+    push 20
+    gt
+    jnz spd
+    jmp food_now
+spd:
+    gload 13
+    push 12
+    sub
+    gstore 13
+food_now:
+    call place_food
+step_done:
+    jmp draw
+
+die:
+    push 0
+    gstore 4
+    beep 200 400
+    gload 3
+    gload 11
+    gt
+    jnz die_save
+    jmp draw
+die_save:
+    gload 3
+    save K1
+    gload 3
+    gstore 11
+    jmp draw
+
+; ================= place_food: не на теле =================
+place_food:
+    push 42
+    rand
+    gstore 5            ; foodX 0..41
+    push 15
+    rand
+    gstore 6            ; foodY 0..14
+    push 0
+    gstore 8
+pf_loop:
+    gload 8
+    gload 0
+    ge
+    jnz pf_ret
+    ; клетка тела = 42*y+x; сравниваем x и y отдельно
+    push 100
+    gload 8
+    add
+    gloadi
+    push 42
+    div                 ; y тела
+    gload 6
+    eq
+    jnz pf_chk2
+    jmp pf_next
+pf_chk2:
+    push 100
+    gload 8
+    add
+    gloadi
+    dup                 ; cell cell
+    push 42
+    div                 ; cell y
+    push 42
+    mul                 ; cell 42y
+    sub                 ; x = cell - 42y
+    gload 5
+    eq
+    jnz pf_again
+    jmp pf_next
+pf_next:
+    gload 8
+    push 1
+    add
+    gstore 8
+    jmp pf_loop
+pf_again:
+    push 42
+    rand
+    gstore 5
+    push 15
+    rand
+    gstore 6
+    push 0
+    gstore 8
+    jmp pf_loop
+pf_ret:
+    ret
+
+; ================= draw =================
+draw:
+    cls
+    ; рамка: rect 0 0 128 48
+    push 0
+    push 0
+    push 128
+    push 48
+    push 1
+    rect
+    ; еда (мигает): 2x2 в центре клетки
+    msec
+    push 400
+    mod
+    push 200
+    lt
+    jnz food_draw
+    jmp body
+food_draw:
+    gload 5
+    push 3
+    mul
+    push 1
+    add
+    gload 6
+    push 3
+    mul
+    push 1
+    add
+    push 2
+    push 2
+    push 1
+    frect
+body:
+    ; тело: i=0..len-1, клетка g[100+i]
+    push 0
+    gstore 8
+b_loop:
+    gload 8
+    gload 0
+    ge
+    jnz b_done
+    push 100
+    gload 8
+    add
+    gloadi
+    push 42
+    div
+    gstore 9            ; cy
+    push 100
+    gload 8
+    add
+    gloadi
+    push 42
+    gload 9
+    mul
+    sub
+    gstore 7            ; cx
+    gload 7
+    push 3
+    mul
+    push 1
+    add
+    gload 9
+    push 3
+    mul
+    push 1
+    add
+    push 2
+    push 2
+    push 1
+    frect
+    gload 8
+    push 1
+    add
+    gstore 8
+    jmp b_loop
+b_done:
+    ; счёт
+    text 3 2 1 S2
+    push 18
+    push 2
+    push 1
+    gload 3
+    num
+    text 3 10 1 S3
+    push 24
+    push 10
+    push 1
+    gload 11
+    num
+    ; game over
+    gload 4
+    jnz dd
+    text 34 24 1 S4
+dd:
+    disp
+    jmp main
