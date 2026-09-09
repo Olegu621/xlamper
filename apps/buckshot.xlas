@@ -1,0 +1,505 @@
+; ==========================================
+;  Buckshot Roulette для C3 XLAMPER (v2)
+;  Управление: влево/вправо — выбор цели
+;  OK — выстрел
+; ==========================================
+
+; --- Глобальные переменные (0..15) ---
+; 0: lives_player
+; 1: lives_bot
+; 2: count (всего патронов)
+; 3: index (текущий)
+; 4: choice (0 = в себя, 1 = в бота)
+; 5: temp (вспомогательная)
+; 6: temp2
+; 7: temp3
+; 10-15: патроны (0=холостой, 1=боевой) - используем ячейки 10..15
+
+start:
+    ; --- Инициализация ---
+    push 4
+    gstore 0          ; жизни игрока = 4
+    push 4
+    gstore 1          ; жизни бота = 4
+
+    ; случайное число патронов от 2 до 6
+    syscall msec
+    syscall rand
+    push 5
+    mod               ; 0..4
+    push 2
+    add               ; 2..6
+    gstore 2          ; count
+
+    ; --- Создание магазина ---
+    gload 2
+    push 2
+    div               ; количество боевых = count / 2
+    push 1
+    add               ; +1 чтобы было больше боевых (например, 3 -> 2 боевых)
+    gload 2
+    min               ; не больше count
+    gstore 5          ; temp = боевых
+
+    ; Заполняем массив: сначала боевые (1), потом холостые (0)
+    push 0            ; i = 0
+fill_loop:
+    gload 5           ; боевых осталось?
+    push 0
+    gt?
+    jmpz fill_blanks
+    ; ставим 1
+    push 10           ; базовый адрес
+    gload 0           ; i
+    add               ; адрес = 10 + i
+    push 1            ; значение
+    gstore            ; сохраняем 1
+    gload 5
+    push 1
+    sub
+    gstore 5
+    jmp fill_next
+
+fill_blanks:
+    ; ставим 0
+    push 10
+    gload 0
+    add
+    push 0
+    gstore
+fill_next:
+    gload 0
+    push 1
+    add
+    gstore 0
+    gload 0
+    gload 2
+    lt?
+    jmpz fill_done
+    jmp fill_loop
+
+fill_done:
+    ; --- Перемешивание (Fisher-Yates) ---
+    gload 2
+    push 1
+    sub
+    gstore 5          ; i = count-1
+shuffle_loop:
+    gload 5
+    push 0
+    le?
+    jmpz shuffle_done
+    ; random j = rand % (i+1)
+    syscall msec
+    syscall rand
+    gload 5
+    push 1
+    add
+    mod
+    gstore 0          ; j
+    ; swap arr[i] и arr[j]
+    push 10
+    gload 5
+    add
+    gload            ; a = arr[i]
+    gstore 6          ; temp = a
+    push 10
+    gload 0           ; j
+    add
+    gload            ; b = arr[j]
+    push 10
+    gload 5
+    add
+    gstore            ; arr[i] = b
+    gload 6           ; a
+    push 10
+    gload 0           ; j
+    add
+    gstore            ; arr[j] = a
+    ; уменьшаем i
+    gload 5
+    push 1
+    sub
+    gstore 5
+    jmp shuffle_loop
+shuffle_done:
+
+    ; --- Начальные установки ---
+    push 0
+    gstore 3          ; index = 0
+    push 0
+    gstore 4          ; choice = 0 (в себя)
+
+; ==========================================
+;   Главный цикл
+; ==========================================
+main_loop:
+    ; --- Очистка экрана ---
+    push 0
+    push 0
+    push 0
+    push 128
+    push 64
+    rect
+
+    ; --- Отображение жизней ---
+    push "I:"
+    push 5 push 0
+    text
+    gload 0
+    push 48
+    add
+    push 25 push 0
+    textchar
+
+    push "B:"
+    push 45 push 0
+    text
+    gload 1
+    push 48
+    add
+    push 65 push 0
+    textchar
+
+    ; --- Информация о патронах ---
+    push "Patr:"
+    push 5 push 15
+    text
+    gload 2
+    push 48
+    add
+    push 45 push 15
+    textchar
+
+    ; подсчёт боевых среди оставшихся
+    push 0
+    gstore 5          ; battle = 0
+    gload 3
+    gstore 0          ; i = index
+count_loop:
+    gload 0
+    gload 2
+    lt?
+    jmpz count_done
+    push 10
+    gload 0
+    add
+    gload
+    push 1
+    eq?
+    jmpz count_next
+    gload 5
+    push 1
+    add
+    gstore 5
+count_next:
+    gload 0
+    push 1
+    add
+    gstore 0
+    jmp count_loop
+count_done:
+    gload 5
+    push 48
+    add
+    push 70 push 15
+    textchar
+    push "/"
+    push 80 push 15
+    text
+    gload 2
+    gload 3
+    sub
+    gload 5
+    sub
+    push 48
+    add
+    push 90 push 15
+    textchar
+
+    ; --- Выбор цели ---
+    push "->"
+    push 20 push 35
+    text
+    gload 4
+    push 0
+    eq?
+    jmpz show_enemy
+    push "S E B Y"
+    push 35 push 35
+    text
+    jmp show_choice_done
+show_enemy:
+    push "V R A G A"
+    push 35 push 35
+    text
+show_choice_done:
+
+    ; --- Чтение стика ---
+    syscall stick
+    dup
+    push -1
+    eq?
+    jmpz no_input
+    dup
+    push 6            ; влево
+    eq?
+    jmpz check_right
+    push 0
+    gstore 4
+    jmp no_input
+check_right:
+    dup
+    push 2            ; вправо
+    eq?
+    jmpz check_ok
+    push 1
+    gstore 4
+    jmp no_input
+check_ok:
+    dup
+    push 5            ; OK
+    eq?
+    jmpz check_exit
+    jmp do_shot
+check_exit:
+    dup
+    push 6            ; выход (может быть другое, но оставим)
+    eq?
+    jmpz no_input
+    syscall exit
+no_input:
+    syscall msec
+    push 100
+    add
+    syscall wait
+    jmp main_loop
+
+; ==========================================
+;   Выстрел
+; ==========================================
+do_shot:
+    ; проверим, есть ли патроны
+    gload 3
+    gload 2
+    lt?
+    jmpz out_of_ammo
+
+    ; берём патрон
+    push 10
+    gload 3
+    add
+    gload            ; патрон (0/1)
+    gstore 6          ; сохраним
+
+    ; увеличиваем индекс
+    gload 3
+    push 1
+    add
+    gstore 3
+
+    ; проверим, боевой?
+    gload 6
+    push 1
+    eq?
+    jmpz blank_shot
+
+    ; --- Боевой выстрел ---
+    gload 4
+    push 0
+    eq?
+    jmpz shoot_bot
+    ; стреляем в себя
+    gload 0
+    push 1
+    sub
+    gstore 0
+    syscall beep 150 200
+    jmp after_shot
+shoot_bot:
+    gload 1
+    push 1
+    sub
+    gstore 1
+    syscall beep 200 200
+    jmp after_shot
+
+blank_shot:
+    syscall beep 100 100
+
+after_shot:
+    ; --- Проверка смерти ---
+    gload 0
+    push 0
+    le?
+    jmpz check_bot_dead
+    jmp game_over
+check_bot_dead:
+    gload 1
+    push 0
+    le?
+    jmpz check_ammo_left
+    jmp game_over
+
+check_ammo_left:
+    gload 3
+    gload 2
+    lt?
+    jmpz out_of_ammo
+
+    ; --- Ход бота (если жив) ---
+    ; стратегия: если боевых патронов больше холостых, стреляет в игрока, иначе в себя
+    ; подсчёт боевых среди оставшихся
+    push 0
+    gstore 5          ; battle = 0
+    gload 3
+    gstore 0          ; i = index
+bot_count_loop:
+    gload 0
+    gload 2
+    lt?
+    jmpz bot_count_done
+    push 10
+    gload 0
+    add
+    gload
+    push 1
+    eq?
+    jmpz bot_count_next
+    gload 5
+    push 1
+    add
+    gstore 5
+bot_count_next:
+    gload 0
+    push 1
+    add
+    gstore 0
+    jmp bot_count_loop
+bot_count_done:
+    gload 2
+    gload 3
+    sub
+    gload 5
+    sub
+    gstore 0          ; blank = (count - index) - battle
+    gload 5
+    gload 0
+    gt?
+    jmpz bot_shoot_self
+    ; стреляем в игрока
+    push 10
+    gload 3
+    add
+    gload
+    gstore 6
+    gload 3
+    push 1
+    add
+    gstore 3
+    gload 6
+    push 1
+    eq?
+    jmpz bot_blank
+    gload 0
+    push 1
+    sub
+    gstore 0
+    syscall beep 150 200
+    jmp bot_after_shot
+bot_blank:
+    syscall beep 100 100
+    jmp bot_after_shot
+
+bot_shoot_self:
+    push 10
+    gload 3
+    add
+    gload
+    gstore 6
+    gload 3
+    push 1
+    add
+    gstore 3
+    gload 6
+    push 1
+    eq?
+    jmpz bot_self_blank
+    gload 1
+    push 1
+    sub
+    gstore 1
+    syscall beep 200 200
+    jmp bot_after_shot
+bot_self_blank:
+    syscall beep 100 100
+
+bot_after_shot:
+    ; проверка смерти после хода бота
+    gload 0
+    push 0
+    le?
+    jmpz bot_check_bot
+    jmp game_over
+bot_check_bot:
+    gload 1
+    push 0
+    le?
+    jmpz bot_ammo_check
+    jmp game_over
+bot_ammo_check:
+    gload 3
+    gload 2
+    lt?
+    jmpz out_of_ammo
+    jmp main_loop
+
+; --- Конец игры (патроны кончились) ---
+out_of_ammo:
+    gload 0
+    gload 1
+    gt?
+    jmpz out_draw_or_lose
+    push 0 push 0 push 0 push 128 push 64 rect
+    push "YOU WIN!"
+    push 30 push 20
+    text
+    jmp game_over_wait
+out_draw_or_lose:
+    gload 0
+    gload 1
+    eq?
+    jmpz out_lose
+    push "DRAW"
+    push 40 push 20
+    text
+    jmp game_over_wait
+out_lose:
+    push "YOU LOSE"
+    push 30 push 20
+    text
+    jmp game_over_wait
+
+; --- Игрок умер или бот умер ---
+game_over:
+    push 0 push 0 push 0 push 128 push 64 rect
+    gload 0
+    push 0
+    le?
+    jmpz bot_died
+    push "YOU LOSE"
+    push 30 push 20
+    text
+    jmp game_over_wait
+bot_died:
+    push "YOU WIN!"
+    push 30 push 20
+    text
+
+game_over_wait:
+wait_exit:
+    syscall stick
+    push 5
+    eq?
+    jmpz wait_exit
+    syscall exit
