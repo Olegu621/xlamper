@@ -1,4 +1,4 @@
-﻿"""
+"""
 xla_sim — симулятор XLA VM (C3 XLAMPER) на Python.
 Точная копия семантики VM из c3_flipper.ino (v1).
 Рисует в ASCII-канвас 128x64, события подаются скриптом.
@@ -12,6 +12,7 @@ import sys
 from dataclasses import dataclass, field
 
 _TRACE_G = False  # отладка: трассировка GLOADI на stderr
+_TRACE_RET = False  # отладка: печать CALL/RET на stderr
 
 W, H = 128, 64
 XLA_Y_OFF = 16  # синяя зона приложений (как XLA_Y_OFF в прошивке); 0..15 — жёлтый бар
@@ -137,6 +138,10 @@ class Sim:
     frames: int = 0
     budget_used: int = 0
     logs: list = field(default_factory=list)
+    http_buf: bytes = b""  # ответ HTTPGET (интернет-приложения)
+    http_len: int = -1
+    stick_x: int = 2048  # аналоговый стик для симуляции (2048 = центр)
+    stick_y: int = 2048
 
     # ---- fetch ----
     def f8(self):
@@ -276,7 +281,9 @@ class Sim:
             elif op == 0x46:
                 idx = self.f16()
                 if idx >= len(self.data):
-                    raise VMError(f"g OOB gload imm={idx} len={len(self.data)} pc0={self.pc - 1}")
+                    raise VMError(
+                        f"g OOB gload imm={idx} len={len(self.data)} pc0={self.pc - 1}"
+                    )
                 self.push(self.data[idx])
             elif op == 0x47:
                 idx = self.pop()
@@ -287,13 +294,18 @@ class Sim:
             elif op == 0x48:
                 idx = self.pop()
                 if _TRACE_G:
-                    print(f"GLOADI idx={idx} frames={self.frames} stack={self.stack}", file=sys.stderr)
+                    print(
+                        f"GLOADI idx={idx} frames={self.frames} stack={self.stack}",
+                        file=sys.stderr,
+                    )
                 if idx < 0 or idx >= len(self.data):
                     print(
                         f"DBG g8(i)={self.data[8]} g0(len)={self.data[0]} frames={self.frames} pc={self.pc} stack={self.stack}",
                         file=sys.stderr,
                     )
-                    raise VMError(f"g OOB gloadi idx={idx} len={len(self.data)} pc0={self.pc - 1}")
+                    raise VMError(
+                        f"g OOB gloadi idx={idx} len={len(self.data)} pc0={self.pc - 1}"
+                    )
                 self.push(self.data[idx])
             elif op == 0x49:
                 n = self.pop()
@@ -322,18 +334,30 @@ class Sim:
                     self.pc = _w(self.pc + rel) & 0xFFFF
             elif op == 0x53:
                 rel = self.s16()
+                if _TRACE_RET:
+                    print(
+                        f"CALL pc={self.pc - 3} -> {self.pc + rel} depth={len(self.ret)}",
+                        file=sys.stderr,
+                    )
                 if len(self.ret) >= RET_MAX:
                     raise VMError("ret ovf")
                 self.ret.append(self.pc)
                 self.pc = _w(self.pc + rel) & 0xFFFF
             elif op == 0x54:
+                if _TRACE_RET:
+                    print(
+                        f"RET pc={self.pc - 1} depth={len(self.ret)}", file=sys.stderr
+                    )
                 if not self.ret:
                     raise VMError("ret und")
                 self.pc = self.ret.pop()
             elif op == 0x5F:
                 self.vtime_ms += 16  # виртуальный кадр ≈ 60fps железа
                 if self.stack:
-                    print(f"WARN stack@frame: {self.stack} pc={self.pc - 1}", file=sys.stderr)
+                    print(
+                        f"WARN stack@frame: {self.stack} pc={self.pc - 1}",
+                        file=sys.stderr,
+                    )
                 return FRAME
             elif op == 0x60:
                 c, y, x = self.pop(), self.pop(), self.pop()
@@ -432,13 +456,55 @@ class Sim:
                 x = self.pop()
                 self.disp.cx, self.disp.cy, self.disp.size = x, y + XLA_Y_OFF, f
                 self._text(str(v))
+            elif op == 0x78:
+                # HTTPGET strIdx — в симуляторе: urllib в этот URL (для отладки парсинга)
+                import urllib.request as _ur
+
+                koff = self.f16()
+                url = self.str_at(koff)
+                self.http_buf = b""
+                try:
+                    with _ur.urlopen(url, timeout=8) as r:  # noqa: S310
+                        self.http_buf = r.read()[:1400]
+                    self.http_len = len(self.http_buf)
+                except OSError:
+                    self.http_len = -1
+                self.push(self.http_len)
+            elif op == 0x79:
+                i = self.pop()
+                c = self.http_buf[i] if 0 <= i < len(self.http_buf) else 0
+                self.push(c)
+            elif op == 0x7B:
+                # WGET dst cnt: HTTP-ответ -> data-секция int16-словами.
+                # «бесконечная память из облака»: приложение тянет данные
+                # (миди, спрайты, уровни) прямо в свои глобалы.
+                cnt = self.pop()
+                dst = self.pop()
+                if (
+                    cnt < 0
+                    or dst < 0
+                    or dst + cnt > len(self.data)
+                    or self.http_len < 0
+                ):
+                    raise VMError("wget OOB")
+                n = min(cnt * 2, len(self.http_buf))
+                words = n // 2
+                for w in range(cnt):
+                    self.data[dst + w] = 0
+                for w in range(words):
+                    lo = self.http_buf[w * 2]
+                    hi = self.http_buf[w * 2 + 1]
+                    self.data[dst + w] = (hi << 8) | lo
+                self.push(words)
             elif op == 0x7A:
                 ms = self.pop()
                 self.logs.append(f"delay({ms})")
             elif op == 0x80:
-                self.push(0)  # stx центр
+                # стик X: аналоговое положение 0..4095 (2048 = центр)
+                self.push(self.stick_x)
             elif op == 0x81:
-                self.push(0)
+                # стик Y: аналоговое положение 0..4095 (2048 = центр, вниз = больше)
+                self.push(self.stick_y)
             elif op == 0x82:
                 # стик: маппинг события -> 8-way (0 up, 2 right, 4 down, 6 left); idle -> -1
                 evmap = {1: 0, 2: 4, 3: 6, 4: 2}  # ev: 1 up, 2 down, 3 left, 4 right
