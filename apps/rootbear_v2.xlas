@@ -61,9 +61,7 @@ start:
 ; ================= main loop =================
 main:
     frame
-    ; ---- таймер (только в serve) ----
-    gload 5
-    jnz mn_timer_skip
+    ; ---- таймер: НЕПРЕРЫВНЫЙ (как в оригинале: 60с на всё) ----
     gload 4
     push 1
     sub
@@ -79,14 +77,26 @@ mn_t_ok:
     push 0
     eq
     jnz mn_time_up
-    jmp mn_event
+    jmp mn_grade_or_event
 mn_time_up:
+    gload 5
+    push 2
+    eq
+    jnz mn_go_hold          ; уже game over: не спамить, просто кадр
     push 2
     gstore 5
+    push 0
+    gstore 10               ; сброс градT (оценка прерывается таймаутом)
     call game_over
     jmp main
-mn_timer_skip:
+mn_go_hold:
+    jmp draw
+mn_grade_or_event:
     ; в poured: таймер оценки, потом новый заказ
+    gload 5
+    jnz mn_grade_tick
+    jmp mn_event
+mn_grade_tick:
     gload 10
     push 1
     sub
@@ -703,13 +713,13 @@ dr_hud:
     push 1
     gload 22
     num
-    ; таймер-полоска: ширина = timeLeft/75 (3600/75 = 48 max)
+    ; таймер-полоска: ширина = timeLeft/75 (3600/75 = 48 max), высота 1
     push 2
     push 6
     gload 4
     push 75
     div
-    push 48
+    push 1
     push 1
     frect
 
