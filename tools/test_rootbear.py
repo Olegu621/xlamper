@@ -67,7 +67,8 @@ def main() -> None:
     print(f"nvs: {sim.nvs}")
     g = sim.data
     print(
-        f"globals: fill={g[0]} foam={g[1]} score={g[4]} best={g[5]} state={g[6]} target={g[7]} streak={g[8]}"
+        f"globals: fill={g[0]} foam={g[1]} flow={g[2]} score={g[3]} best={g[4]} "
+        f"state={g[5]} target={g[6]} streak={g[7]} client={g[9]}"
     )
 
 
