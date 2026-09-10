@@ -1,0 +1,837 @@
+; ==================================================================
+; ROOT BEAR v2 — идеальный порт Playdate-игры для C3 XLAMPER
+; Оригинал: Root Bear by TEAM ROOT (alexsussy.itch.io/root-bear)
+; Спрайты медведей: 1:1 из оригинального .pdx (конвертация .pdi)
+;
+; МЕХАНИКА (как в оригинале, адаптация crank -> стик):
+;   Стик вниз  = кран открыт. Чуть наклонил = медленный поток,
+;   до упора вниз = мощный поток (риск перелить).
+;   Отпустил стик = кран закрыт -> порция засчитана (оценка).
+;   Пена: наливается с пивом, ОСЕДАЕТ после закрытия крана:
+;   уровень окажется НИЖЕ чем видно — учитывай пену (как в оригинале!)
+;   Отметка на стакане: dotted line = желаемый уровень.
+;   Оценка: PERFECT +$8 (точно), GOOD +$4, MEH +$1, SPILL $0 (rage).
+;   Таймер 60с жёсткий. Бесконечные клиенты, рекорд в NVS.
+; ==================================================================
+.title ROOTBEAR
+.data 40
+; g0 fill      уровень пива 0..100 (внутренняя шкала стакана)
+; g1 foam      пена 0..100 (пена оседает! уровень = fill + foam/4)
+; g2 flow      текущий поток 0..100 (0 = кран закрыт)
+; g3 money     заработано $
+; g4 timeLeft  сотые доли секунды (6000 = 60с)
+; g5 state     0=serve 1=poured(оценка показана) 2=gameover
+; g6 target    целевой уровень 25..95
+; g7 glass     тип стакана 0..3 (влияет на скорость налива)
+; g8 t         анимация
+; g9 grade     0 none,1 perfect,2 good,3 meh,4 spill
+; g10 gradT    таймер показа оценки (кадры)
+; g11 bearAnim фаза медведя 0 neutral,1 blink,2 nervous1,3 nervous2
+; g12 bearT    таймер анимации медведя
+; g13 pours    счётчик порций
+; g14 foamR    аккумулятор роста пены
+
+.str S1 ROOT BEAR
+.str S2 TIP JAR
+.str S3 POUR!
+.str S4 PERFECT
+.str S5 GOOD
+.str S6 MEH
+.str S7 RAGE!
+.str S8 SPILL!
+.str S9 NEW BEST!
+.str SA HOLD=EXIT
+.str SB STICK DOWN TO POUR
+.str K1 best
+.str K2 pours
+
+; стек: [exp] event -> 0 none,1..5 dirs/click,6 exit
+; ================= init =================
+start:
+    push 3600
+    gstore 4
+    push 0
+    gstore 3
+    push 0
+    gstore 13
+    load K1 0
+    gstore 15
+    call new_order
+
+; ================= main loop =================
+main:
+    frame
+    ; ---- таймер (только в serve) ----
+    gload 5
+    jnz mn_timer_skip
+    gload 4
+    push 1
+    sub
+    dup
+    push 0
+    ge
+    jnz mn_t_ok
+    drop
+    push 0
+mn_t_ok:
+    gstore 4
+    gload 4
+    push 0
+    eq
+    jnz mn_time_up
+    jmp mn_event
+mn_time_up:
+    push 2
+    gstore 5
+    call game_over
+    jmp main
+mn_timer_skip:
+    ; в poured: таймер оценки, потом новый заказ
+    gload 10
+    push 1
+    sub
+    dup
+    push 0
+    ge
+    jnz mn_gt_ok
+    drop
+    push 0
+mn_gt_ok:
+    gstore 10
+    gload 10
+    jz main_g0
+    jmp mn_event
+main_g0:
+    call new_order
+mn_event:
+    event
+    dup
+    push 6
+    eq
+    jnz ev_exit
+    drop
+    ; ---- стик: налив ----
+    gload 5
+    jnz ev_after_pour     ; в poured стик игнорируется
+    sty
+    push 2300
+    sub                  ; 0..1795
+    dup
+    push 0
+    le
+    jnz flow_zero
+    push 18
+    div                  ; 0..99
+    dup
+    push 0
+    gt
+    jnz flow_ok
+    drop
+    push 0
+flow_ok:
+    gstore 2
+    jmp ev_pour
+flow_zero:
+    drop
+    ; стик отпущен: если лили — оценка
+    gload 2
+    jnz ev_serve
+    push 0
+    gstore 2
+    jmp ev_after_pour
+ev_pour:
+    call pour_frame
+    jmp ev_after_pour
+ev_serve:
+    push 0
+    gstore 2
+    call settle_and_grade
+    jmp ev_after_pour
+ev_after_pour:
+    call bear_tick
+    jmp draw
+
+ev_exit:
+    drop
+    exit
+
+; ================= налив (один кадр) =================
+pour_frame:
+    ; поток в шкалу стакана: скорость зависит от типа стакана
+    gload 2
+    gload 7
+    push 3
+    add              ; /3 /4 /5 /6 по типу (0..3)
+    div              ; flow / (3+glass)
+    gload 0
+    add
+    push 100
+    min
+    gstore 0
+    ; пена: растёт от потока (сильный поток = пена быстро)
+    gload 2
+    push 8
+    div
+    gload 14
+    add
+    gstore 14
+    gload 14
+    push 3
+    ge
+    jnz pf_foam_up
+    ret
+pf_foam_up:
+    push 0
+    gstore 14
+    gload 1
+    push 1
+    add
+    push 60
+    min
+    gstore 1
+    ret
+
+; ================= стик отпущен: пена осела -> оценка =================
+settle_and_grade:
+    ; пена оседает: уровень = fill + foam/4 (пена опадает, пиво остаётся)
+    gload 0
+    gload 1
+    push 4
+    div
+    add
+    gstore 16        ; eff уровень
+    gload 16
+    gload 6
+    sub
+    ; abs
+    dup
+    push 0
+    lt
+    jnz sg_neg
+    jmp sg_pos
+sg_neg:
+    push -1
+    mul
+sg_pos:
+    gstore 16        ; diff
+    ; перелив: fill+foam > 100
+    gload 0
+    gload 1
+    add
+    push 100
+    gt
+    jnz sg_spill
+    ; perfect: diff <= 4
+    gload 16
+    push 4
+    le
+    jnz sg_perfect
+    ; good: diff <= 12
+    gload 16
+    push 12
+    le
+    jnz sg_good
+    ; meh: diff <= 30
+    gload 16
+    push 30
+    le
+    jnz sg_meh
+    ; почти пусто/мимо: $1
+    jmp sg_bad
+sg_perfect:
+    push 1
+    gstore 9
+    push 8
+    gstore 17
+    gload 3
+    push 8
+    add
+    gstore 3
+    beep 1600 60
+    beep 1900 90
+    jmp sg_done
+sg_good:
+    push 2
+    gstore 9
+    push 4
+    gstore 17
+    gload 3
+    push 4
+    add
+    gstore 3
+    beep 1200 80
+    jmp sg_done
+sg_meh:
+    push 3
+    gstore 9
+    push 1
+    gstore 17
+    gload 3
+    push 1
+    add
+    gstore 3
+    beep 700 120
+    jmp sg_done
+sg_bad:
+    push 3
+    gstore 9
+    push 1
+    gstore 17
+    gload 3
+    push 1
+    add
+    gstore 3
+    beep 500 120
+    jmp sg_done
+sg_spill:
+    push 4
+    gstore 9
+    push 0
+    gstore 17
+    beep 300 150
+    beep 200 250
+    jmp sg_done
+sg_done:
+    push 1
+    gstore 5
+    push 90
+    gstore 10        ; 90 кадров (~1.5с) показ оценки
+    gload 13
+    push 1
+    add
+    gstore 13
+    ; рекорд денег
+    gload 3
+    gload 15
+    gt
+    jz sg_no_best
+    gload 3
+    save K1
+    gload 3
+    gstore 15
+    ret
+sg_no_best:
+    ret
+
+; ================= следующий заказ =================
+new_order:
+    push 0
+    gstore 5
+    push 0
+    gstore 0
+    push 0
+    gstore 1
+    push 0
+    gstore 2
+    push 0
+    gstore 14
+    push 0
+    gstore 9
+    push 0
+    gstore 10
+    push 0
+    gstore 12
+    ; стакан 0..3
+    push 4
+    rand
+    gstore 7
+    ; цель 25..95
+    push 71
+    rand
+    push 25
+    add
+    gstore 6
+    beep 900 40
+    ret
+
+; ================= анимация медведя =================
+bear_tick:
+    gload 12
+    push 1
+    add
+    gstore 12
+    ; в serve при наливе (flow>0): nervous качается
+    gload 5
+    jnz bt_poured
+    gload 2
+    jnz bt_nervous
+    ; idle: blink каждые ~100 кадров
+    gload 12
+    push 100
+    mod
+    push 95
+    ge
+    jnz bt_blink
+    push 0
+    gstore 11
+    ret
+bt_blink:
+    push 1
+    gstore 11
+    ret
+bt_nervous:
+    gload 12
+    push 6
+    mod
+    push 3
+    ge
+    jnz bt_n2
+    push 2
+    gstore 11
+    ret
+bt_n2:
+    push 3
+    gstore 11
+    ret
+bt_poured:
+    ; в poured медведь = по оценке
+    gload 9
+    push 1
+    eq
+    jnz bt_perfect
+    gload 9
+    push 2
+    eq
+    jnz bt_good
+    gload 9
+    push 3
+    eq
+    jnz bt_meh
+    push 4
+    gstore 11     ; spill -> rage
+    ret
+bt_perfect:
+    push 5
+    gstore 11
+    ret
+bt_good:
+    push 6
+    gstore 11
+    ret
+bt_meh:
+    push 7
+    gstore 11
+    ret
+
+; ================= отрисовка =================
+draw:
+    cls
+
+    ; ---- медведь ----
+    gload 11
+    jz dr_b0
+    gload 11
+    push 1
+    eq
+    jz dr_b1
+    gload 11
+    push 2
+    eq
+    jz dr_b2
+    gload 11
+    push 3
+    eq
+    jz dr_b3
+    gload 11
+    push 4
+    eq
+    jz dr_b4
+    gload 11
+    push 5
+    eq
+    jz dr_b5
+    gload 11
+    push 6
+    eq
+    jz dr_b6
+    jmp dr_b7
+dr_b0:
+    call draw_b_neutral
+    jmp dr_bear_done
+dr_b1:
+    call draw_b_blink
+    jmp dr_bear_done
+dr_b2:
+    call draw_b_nervous1
+    jmp dr_bear_done
+dr_b3:
+    call draw_b_nervous2
+    jmp dr_bear_done
+dr_b4:
+    call draw_b_rage
+    jmp dr_bear_done
+dr_b5:
+    call draw_b_perfect
+    jmp dr_bear_done
+dr_b6:
+    call draw_b_good
+    jmp dr_bear_done
+dr_b7:
+    call draw_b_meh
+dr_bear_done:
+
+    ; ---- кран: корпус + ручка по потоку ----
+    call draw_tap
+
+    ; ---- стакан (24x35 @ x=64 y=10) ----
+    push 64
+    push 10
+    call draw_glass
+
+    ; ---- ПИВО: fill -> высота (внутр. зона стакана y=12..42) ----
+    gload 0
+    push 0
+    gt
+    jnz dr_beer
+    jmp dr_foam
+dr_beer:
+    gload 0
+    push 30
+    mul
+    push 100
+    div            ; h = fill*30/100
+    push 42
+    swap
+    sub            ; y = 42 - h
+    gstore 18      ; beerY
+    push 66
+    gload 18
+    push 20
+    gload 0
+    push 30
+    mul
+    push 100
+    div
+    push 1
+    frect
+    ; волна-линии на пиве
+    gload 18
+    push 3
+    add
+    gstore 19
+dr_wav:
+    gload 19
+    push 41
+    lt
+    jnz dr_wav_do
+    jmp dr_foam
+dr_wav_do:
+    push 66
+    gload 19
+    push 20
+    push 1
+    push 0
+    frect
+    gload 19
+    push 5
+    add
+    gstore 19
+    jmp dr_wav
+
+dr_foam:
+    ; пена: белая шапка над пивом
+    gload 1
+    push 0
+    gt
+    jnz dr_foam_do
+    jmp dr_target
+dr_foam_do:
+    gload 1
+    push 6
+    mul
+    push 100
+    div            ; fh = foam*6/100 (макс 6px)
+    gload 18
+    push 2
+    sub
+    swap
+    sub            ; y = beerY-2 - fh
+    gstore 19
+    push 66
+    gload 19
+    push 20
+    gload 1
+    push 6
+    mul
+    push 100
+    div
+    push 1
+    frect
+    ; пузыри пены (мигают)
+    msec
+    push 200
+    div
+    push 2
+    mod
+    jnz dr_foam_a
+    push 68
+    gload 19
+    push 1
+    sub
+    push 2
+    push 2
+    push 1
+    frect
+    jmp dr_target
+dr_foam_a:
+    push 78
+    gload 19
+    push 1
+    sub
+    push 3
+    push 2
+    push 1
+    frect
+    jmp dr_target
+
+dr_target:
+    ; целевая отметка: пунктир + число
+    gload 6
+    push 30
+    mul
+    push 100
+    div
+    push 42
+    swap
+    sub
+    gstore 19      ; targetY
+    push 62
+    gload 19
+    push 3
+    push 1
+    push 1
+    frect
+    push 67
+    gload 19
+    push 3
+    push 1
+    push 1
+    frect
+    push 72
+    gload 19
+    push 3
+    push 1
+    push 1
+    frect
+    push 77
+    gload 19
+    push 3
+    push 1
+    push 1
+    frect
+    push 82
+    gload 19
+    push 3
+    push 1
+    push 1
+    frect
+    push 90
+    gload 19
+    push 4
+    sub
+    push 1
+    gload 6
+    num
+
+    ; ---- СТРУЯ: от крана до пива/пены ----
+    gload 2
+    push 0
+    gt
+    jnz dr_jet
+    jmp dr_hud
+dr_jet:
+    ; ширина по потоку: 1..4
+    gload 2
+    push 30
+    div
+    push 1
+    max
+    gstore 20      ; jetW
+    ; колебание струи
+    msec
+    push 40
+    div
+    push 2
+    mod
+    gstore 21
+    ; низ струи = верх пива (beerY) или дно стакана
+    gload 0
+    push 0
+    gt
+    jnz dr_jet_y
+    push 42
+    gstore 18
+dr_jet_y:
+    ; высота струи: от носика крана (y=9) до верха пива (beerY)
+    gload 18
+    push 9
+    sub
+    push 1
+    max
+    gstore 22      ; jetH
+    push 74
+    gload 21
+    add
+    push 9
+    gload 20
+    gload 22
+    push 1
+    frect
+    jmp dr_hud
+
+dr_hud:
+    ; ---- деньги: TIP JAR справа сверху ----
+    text 92 0 1 S2
+    push 122
+    push 0
+    push 1
+    gload 3
+    num
+    ; ---- порции: xN справа снизу от денег ----
+    push 122
+    push 8
+    push 1
+    gload 13
+    num
+    ; ---- таймер: секунды + полоска сверху слева ----
+    gload 4
+    push 60
+    div
+    gstore 22
+    push 2
+    push 2
+    push 1
+    gload 22
+    num
+    ; таймер-полоска: ширина = timeLeft/75 (3600/75 = 48 max)
+    push 2
+    push 6
+    gload 4
+    push 75
+    div
+    push 48
+    push 1
+    frect
+
+    ; ---- статусные надписи ----
+    gload 5
+    jnz dr_state_poured
+    ; serve: подсказка
+    gload 2
+    jnz dr_pouring_hint
+    text 2 43 1 SB
+    jmp dr_disp
+dr_pouring_hint:
+    text 52 43 1 S3
+    jmp dr_disp
+
+dr_state_poured:
+    ; оценка: имя + $
+    gload 9
+    push 1
+    eq
+    jnz dr_gr_p
+    gload 9
+    push 2
+    eq
+    jnz dr_gr_g
+    gload 9
+    push 3
+    eq
+    jnz dr_gr_m
+    jmp dr_gr_s
+dr_gr_p:
+    text 50 43 1 S4
+    jmp dr_gr_usd
+dr_gr_g:
+    text 50 43 1 S5
+    jmp dr_gr_usd
+dr_gr_m:
+    text 50 43 1 S6
+    jmp dr_gr_usd
+dr_gr_s:
+    text 50 43 1 S8
+    jmp dr_disp
+dr_gr_usd:
+    ; +$N анимация рядом с оценкой
+    push 104
+    push 43
+    push 1
+    gload 17
+    num
+    jmp dr_disp
+
+dr_disp:
+    ; (score compare) рекорд если больше
+    gload 3
+    gload 15
+    gt
+    jnz dr_newbest
+    jmp dr_show
+dr_newbest:
+    text 2 43 1 S9
+dr_show:
+    disp
+    ; gameover: держим экран
+    gload 5
+    push 2
+    eq
+    jnz dr_go_loop
+    jmp main
+dr_go_loop:
+    jmp main
+
+; ================= game over =================
+game_over:
+    push 2
+    gstore 5
+    ; рекорд
+    gload 3
+    gload 15
+    gt
+    jz go_no_best
+    gload 3
+    save K1
+    gload 3
+    gstore 15
+    ret
+go_no_best:
+    ret
+
+; ================= КРАН (процедурный) =================
+draw_tap:
+    ; корпус крана: x 69..79, y 0..6
+    push 69
+    push 0
+    push 10
+    push 6
+    push 1
+    frect
+    ; носик
+    push 72
+    push 6
+    push 4
+    push 3
+    push 1
+    frect
+    ; ручка: индикатор потока
+    gload 2
+    push 0
+    gt
+    jnz dt_open
+    ; закрыт: ручка горизонтально
+    push 74
+    push 0
+    push 5
+    push 1
+    push 1
+    frect
+    ret
+dt_open:
+    push 74
+    push 0
+    push 5
+    push 2
+    push 1
+    frect
+    ret
