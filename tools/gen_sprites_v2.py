@@ -42,6 +42,56 @@ def render(bmp: list[list[int]]) -> str:
     return "\n".join("".join("#" if v else "." for v in row) for row in bmp)
 
 
+def outline_px(px, w0: int, h0: int, invert: bool = True):
+    """Контуры (line-art) из маски: пиксель = 1, если он в маске,
+    но у него есть сосед вне маски (внутри 2px от края).
+    invert=True: маска залита (медведь тёмный) -> контур белый + тёмные
+    внутренние детали (глаза/рот) остаются тёмными = рисуем контур белым,
+    детали потом инвертируем в отдельный проход."""
+
+    def mask(x: int, y: int) -> int:
+        return 1 if 0 <= x < w0 and 0 <= y < h0 and px(x, y) else 0
+
+    def out(x: int, y: int) -> int:
+        if not mask(x, y):
+            return 0
+        # край? сосед (включая диагонали) вне маски
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                if not mask(x + dx, y + dy):
+                    return 1
+        return 0
+
+    return out
+
+
+def detail_px(px, w0: int, h0: int):
+    """Внутренние тёмные детали (глаза/нос/рот): пиксель маски, окружённый
+    маской со всех 4 сторон на расстоянии 1..2 (не край)."""
+
+    def mask(x: int, y: int) -> int:
+        return 1 if 0 <= x < w0 and 0 <= y < h0 and px(x, y) else 0
+
+    def out(x: int, y: int) -> int:
+        if not mask(x, y):
+            return 0
+        # не край
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if not mask(x + dx, y + dy):
+                    return 0
+        # но рядом (2px) есть дырка (глаз/рот)
+        for dy in (-2, -1, 0, 1, 2):
+            for dx in (-2, -1, 0, 1, 2):
+                if not mask(x + dx, y + dy):
+                    return 1
+        return 0
+
+    return out
+
+
 def main() -> None:
     out: list[str] = []
     bears = [
@@ -58,18 +108,38 @@ def main() -> None:
         raw, w, h = pdi2xla.load_pdi(str(PDX / pdi))
         off = pdi2xla.find_bitmap_offset(raw, w, h)
         px0 = pdi2xla.get_px(raw, w, h, off)
-        scale = min(46 / w, 40 / h)
+        scale = min(46 / w, 44 / h)
         tw, th = max(1, round(w * scale)), max(1, round(h * scale))
         ox = (46 - tw) // 2
         sub0 = pdi2xla.resize_px(px0, w, h, tw, th)
 
-        def sub(x: int, y: int, _s=sub0) -> int:
-            return 1 - _s(x, y)  # инверсия: белый силуэт медведя
+        # LINE-ART: контур силуэта + внутренние детали (глаза/рот).
+        # Белым рисуем пиксели медведя, у которых в соседях (8) есть дырку:
+        # это и внешний контур, и границы глаз/рта — читаемое лицо на чёрном.
+        def maskv(x: int, y: int, _s=sub0, _w=tw, _h=th) -> int:
+            return 1 if 0 <= x < _w and 0 <= y < _h and _s(x, y) else 0
 
-        merged = pdi2xla.rows_to_frects(sub, tw, th)
+        edge_set: set[tuple[int, int]] = set()
+        for y in range(th):
+            for x in range(tw):
+                if not maskv(x, y):
+                    continue
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if not maskv(x + dx, y + dy):
+                            edge_set.add((x, y))
+                            break
+                    else:
+                        continue
+                    break
+
+        def line_art(x: int, y: int, _e=edge_set) -> int:
+            return 1 if (x, y) in _e else 0
+
+        merged = pdi2xla.rows_to_frects(line_art, tw, th)
         out.append(f"{name}:")
         for x, y, wd, ht in merged:
-            out += [f"    push {x + ox}", f"    push {y + 4}", f"    push {wd}", f"    push {ht}", "    push 1", "    frect"]
+            out += [f"    push {x + ox}", f"    push {y + 2}", f"    push {wd}", f"    push {ht}", "    push 1", "    frect"]
         out.append("    ret")
 
     dbg = Path(r"C:\Users\admin\flipper\dumps\glass_debug.txt")
