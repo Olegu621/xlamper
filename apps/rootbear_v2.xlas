@@ -171,9 +171,11 @@ pour_frame:
     ; поток в шкалу стакана: скорость зависит от типа стакана
     gload 2
     gload 7
-    push 3
-    add              ; /3 /4 /5 /6 по типу (0..3)
-    div              ; flow / (3+glass)
+    push 2
+    mul
+    push 10
+    add             ; /10 /12 /14 /16 по типу (0..3): МЕДЛЕННЫЙ контролируемый налив
+    div             ; flow / (10+glass*2)
     gload 0
     add
     push 100
@@ -305,8 +307,8 @@ sg_spill:
 sg_done:
     push 1
     gstore 5
-    push 90
-    gstore 10        ; 90 кадров (~1.5с) показ оценки
+    push 45
+    gstore 10        ; 45 кадров (~0.75с) показ оценки
     gload 13
     push 1
     add
@@ -475,9 +477,9 @@ dr_beer:
     swap
     sub            ; y = 42 - h
     gstore 18      ; beerY
-    push 66
+    push 68
     gload 18
-    push 20
+    push 16
     gload 0
     push 30
     mul
@@ -497,9 +499,9 @@ dr_wav:
     jnz dr_wav_do
     jmp dr_foam
 dr_wav_do:
-    push 66
+    push 68
     gload 19
-    push 20
+    push 16
     push 1
     push 0
     frect
@@ -508,6 +510,58 @@ dr_wav_do:
     add
     gstore 19
     jmp dr_wav
+
+    ; пузырьки в пиве: поднимаются (2 фазы мигания), только когда пиво есть
+dr_bubbles:
+    gload 0
+    push 5
+    gt
+    jnz dr_bub_do
+    jmp dr_foam
+dr_bub_do:
+    msec
+    push 250
+    div
+    push 2
+    mod
+    jnz dr_bub_a
+    ; фаза A: два пузырька на разной высоте
+    push 70
+    gload 18
+    push 4
+    add
+    push 1
+    push 1
+    push 0
+    frect
+    push 80
+    gload 18
+    push 8
+    add
+    push 1
+    push 1
+    push 0
+    frect
+    jmp dr_foam
+dr_bub_a:
+    ; фаза B: пузырьки выше (поднимаются)
+    push 72
+    gload 18
+    push 2
+    add
+    push 1
+    push 1
+    push 0
+    frect
+    push 78
+    gload 18
+    push 5
+    add
+    push 1
+    push 1
+    push 0
+    frect
+    jmp dr_foam
 
 dr_foam:
     ; пена: белая шапка над пивом
@@ -528,9 +582,9 @@ dr_foam_do:
     swap
     sub            ; y = beerY-2 - fh
     gstore 19
-    push 66
+    push 68
     gload 19
-    push 20
+    push 16
     gload 1
     push 6
     mul
@@ -566,7 +620,7 @@ dr_foam_a:
     jmp dr_target
 
 dr_target:
-    ; целевая отметка: пунктир + число
+    ; целевая отметка: стрелка-указатель слева + пунктир через стакан + число справа
     gload 6
     push 30
     mul
@@ -576,36 +630,122 @@ dr_target:
     swap
     sub
     gstore 19      ; targetY
+    ; стрелка слева от стакана: острие к стакану
+    push 59
+    gload 19
+    push 2
+    sub
+    push 1
+    push 1
+    push 1
+    frect
+    push 60
+    gload 19
+    push 1
+    sub
+    push 1
+    push 1
+    push 1
+    frect
+    push 61
+    gload 19
+    push 1
+    push 1
+    push 1
+    frect
     push 62
     gload 19
     push 3
     push 1
     push 1
     frect
-    push 67
+    push 63
     gload 19
     push 3
     push 1
     push 1
     frect
-    push 72
+    push 60
+    gload 19
+    push 1
+    sub
+    push 1
+    push 2
+    push 1
+    frect
+    push 60
+    gload 19
+    push 1
+    add
+    push 1
+    push 2
+    push 1
+    frect
+    ; пунктир через стакан (мигает медленно)
+    msec
+    push 400
+    div
+    push 2
+    mod
+    jnz dr_t_dash
+    push 64
     gload 19
     push 3
     push 1
     push 1
     frect
-    push 77
+    push 69
     gload 19
     push 3
     push 1
     push 1
     frect
-    push 82
+    push 74
     gload 19
     push 3
     push 1
     push 1
     frect
+    push 79
+    gload 19
+    push 3
+    push 1
+    push 1
+    frect
+    jmp dr_t_num
+dr_t_dash:
+    push 66
+    gload 19
+    push 2
+    push 1
+    push 1
+    frect
+    push 71
+    gload 19
+    push 2
+    push 1
+    push 1
+    frect
+    push 76
+    gload 19
+    push 2
+    push 1
+    push 1
+    frect
+    push 81
+    gload 19
+    push 2
+    push 1
+    push 1
+    frect
+    push 85
+    gload 19
+    push 2
+    push 1
+    push 1
+    frect
+dr_t_num:
+    ; число цели справа от стакана (y на 4 выше линии)
     push 90
     gload 19
     push 4
@@ -643,21 +783,100 @@ dr_jet:
     push 42
     gstore 18
 dr_jet_y:
-    ; высота струи: от носика крана (y=9) до верха пива (beerY)
+    ; струя: от кончика носика (x=86..87, y=10) вниз до верха пива
     gload 18
-    push 9
+    push 10
     sub
     push 1
     max
-    gstore 22      ; jetH
-    push 74
+    gstore 22      ; jetH = beerY - 10
+    ; ширина струи по потоку: 1..4 (g20), плюс дрожь x (g21)
+    ; струя чуть СУЖАЕТСЯ к низу: рисуем 2 сегмента
+    ; сегмент 1 (верх, от носика): x=86+g21, w=g20
+    push 86
     gload 21
     add
-    push 9
+    push 10
     gload 20
     gload 22
+    push 2
+    div
+    push 1
+    max
     push 1
     frect
+    ; сегмент 2 (низ, к пиву): на 1px уже, чуть смещён
+    gload 22
+    push 2
+    lt
+    jnz dr_jet_done
+    ; x2 = 86 + g21 (ОТДЕЛЬНОЕ значение)
+    push 86
+    gload 21
+    add
+    ; y2 = 10 + jetH/2
+    push 10
+    gload 22
+    push 2
+    div
+    add
+    ; w2 = jetW - 1 (мин 1)
+    gload 20
+    push 1
+    sub
+    push 1
+    max
+    ; h2 = jetH - jetH/2 (мин 1)
+    gload 22
+    gload 22
+    push 2
+    div
+    sub
+    push 1
+    max
+    ; c
+    push 1
+    frect
+    ; брызги при сильном потоке: 2 точки разлета
+    gload 2
+    push 60
+    ge
+    jnz dr_jet_spray
+    jmp dr_jet_done
+dr_jet_spray:
+    msec
+    push 80
+    div
+    push 2
+    mod
+    jnz dr_jet_spray_a
+    push 84
+    push 12
+    push 1
+    push 1
+    push 1
+    frect
+    push 90
+    push 13
+    push 1
+    push 1
+    push 1
+    frect
+    jmp dr_jet_done
+dr_jet_spray_a:
+    push 83
+    push 14
+    push 1
+    push 1
+    push 1
+    frect
+    push 91
+    push 11
+    push 1
+    push 1
+    push 1
+    frect
+dr_jet_done:
     jmp dr_hud
 
 dr_hud:
@@ -1398,39 +1617,167 @@ df_m_go_ret:
     ret
 
 ; ================= КРАН (процедурный) =================
+; ================= КРАН (красивый механизм) =================
+; Композиция (x 62..88, y 0..10):
+;   [БАК-корпус] сверху: корпус 14x5 с крышкой и заклёпками
+;   [ТРУБА] вниз 4x2
+;   [НОСИК] изогнутый: горизонталь 6px + сужение
+;   [РЫЧАГ] слева: ось + ручка, угол зависит от потока (0=вверх, 100=вниз)
+;   при flow>0: из носика капли + подсветка носика мигает
 draw_tap:
-    ; корпус крана: x 69..79, y 0..6
-    push 69
+    ; ---- БАК: корпус x=66..80, y=0..4 (frect 14x4) ----
+    push 66
     push 0
-    push 10
-    push 6
-    push 1
-    frect
-    ; носик
-    push 72
-    push 6
+    push 14
     push 4
-    push 3
     push 1
     frect
-    ; ручка: индикатор потока
+    ; крышка-полоска сверху (двойной контур)
+    push 65
+    push 0
+    push 16
+    push 1
+    push 1
+    frect
+    ; заклёпки: 2 точки внутри бака
+    push 68
+    push 2
+    push 1
+    push 1
+    push 0
+    frect
+    push 77
+    push 2
+    push 1
+    push 1
+    push 0
+    frect
+
+    ; ---- ТРУБА: x=71..74, y=4..6 ----
+    push 71
+    push 4
+    push 4
+    push 2
+    push 1
+    frect
+
+    ; ---- НОСИК: колено x=71..87, y=6..8 + сужение-кончик x=85..88 y=7..9 ----
+    push 71
+    push 6
+    push 14
+    push 2
+    push 1
+    frect
+    push 83
+    push 8
+    push 4
+    push 1
+    push 1
+    frect
+    push 86
+    push 9
+    push 2
+    push 1
+    push 1
+    frect
+    ; кончик носика (тёмное отверстие когда закрыт / мигает когда открыт)
     gload 2
     push 0
     gt
-    jnz dt_open
-    ; закрыт: ручка горизонтально
-    push 74
+    jnz dt_tip_open
+    push 87
+    push 9
+    push 1
+    push 1
     push 0
-    push 5
+    frect
+    jmp dt_lever
+dt_tip_open:
+    msec
+    push 100
+    div
+    push 2
+    mod
+    jnz dt_tip_a
+    push 87
+    push 9
+    push 1
     push 1
     push 1
     frect
-    ret
-dt_open:
-    push 74
+    jmp dt_lever
+dt_tip_a:
+    push 86
+    push 9
+    push 2
+    push 1
+    push 1
+    frect
+
+    ; ---- РЫЧАГ слева: ось (x=69,y=7) + ручка, угол по потоку ----
+    ; flow 0..100 -> ручка длина 6: от (69,1) до (69+cos, 1+sin)
+    ; упрощённо: 3 позиции ручки
+dt_lever:
+    ; ось-болт
+    push 69
+    push 7
+    push 2
+    push 2
+    push 1
+    frect
+    gload 2
     push 0
+    gt
+    jnz dt_lv2
+    ; закрыт: ручка ВВЕРХ (вертикально)
+    push 69
+    push 1
+    push 2
+    push 6
+    push 1
+    frect
+    ret
+dt_lv2:
+    ; открыт: ручка дрожит вниз (угол по потоку: слабый=45°, сильный=90°)
+    ; сильный поток: ручка вниз до y=7
+    gload 2
+    push 50
+    ge
+    jnz dt_lv3
+    ; слабый: 45° — ступенька (2px вправо-вниз)
+    push 71
     push 5
     push 2
+    push 2
+    push 1
+    frect
+    push 69
+    push 3
+    push 2
+    push 2
+    push 1
+    frect
+    ret
+dt_lv3:
+    ; сильный: ручка вертикально вниз + дрожит
+    msec
+    push 60
+    div
+    push 2
+    mod
+    jnz dt_lv4
+    push 69
+    push 1
+    push 2
+    push 6
+    push 1
+    frect
+    ret
+dt_lv4:
+    push 69
+    push 2
+    push 2
+    push 5
     push 1
     frect
     ret
