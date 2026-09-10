@@ -90,6 +90,7 @@ mn_time_up:
     call game_over
     jmp main
 mn_go_hold:
+    call face_tick
     jmp draw
 mn_grade_or_event:
     ; в poured: таймер оценки, потом новый заказ
@@ -158,7 +159,7 @@ ev_serve:
     call settle_and_grade
     jmp ev_after_pour
 ev_after_pour:
-    call bear_tick
+    call face_tick
     jmp draw
 
 ev_exit:
@@ -354,72 +355,92 @@ new_order:
     beep 900 40
     ret
 
-; ================= анимация медведя =================
-bear_tick:
+; ================= лицо: тик анимации =================
+; g11 фаза лица:
+;   0 idle, 1 blink, 2 pouring(глаза на пиво), 3 near(у цели: пот),
+;   4 rage, 5 happy(perfect), 6 smile(good), 7 meh, 8 gameover
+face_tick:
     gload 12
     push 1
     add
     gstore 12
-    ; в serve при наливе (flow>0): nervous качается
+    ; gameover -> всегда 8
     gload 5
-    jnz bt_poured
+    push 2
+    eq
+    jnz ft_go
+    ; в poured: лицо по оценке
+    gload 5
+    jnz ft_grade
+    ; serve: наливаем?
     gload 2
-    jnz bt_nervous
-    ; idle: blink каждые ~100 кадров
+    jnz ft_pouring
+    ; idle: моргание 3 кадра каждые 160
     gload 12
-    push 100
+    push 160
     mod
-    push 95
+    dup
+    push 157
     ge
-    jnz bt_blink
+    jnz ft_blink
+    drop
     push 0
     gstore 11
     ret
-bt_blink:
+ft_blink:
+    drop
     push 1
     gstore 11
     ret
-bt_nervous:
-    gload 12
-    push 6
-    mod
-    push 3
+ft_pouring:
+    ; близко к цели (eff >= target-8) -> фаза 3 (пот+брови)
+    gload 0
+    gload 1
+    push 4
+    div
+    add
+    gload 6
+    push 8
+    sub
     ge
-    jnz bt_n2
+    jnz ft_near
     push 2
     gstore 11
     ret
-bt_n2:
+ft_near:
     push 3
     gstore 11
     ret
-bt_poured:
-    ; в poured медведь = по оценке
+ft_grade:
     gload 9
     push 1
     eq
-    jnz bt_perfect
+    jnz ft_happy
     gload 9
     push 2
     eq
-    jnz bt_good
+    jnz ft_smile
     gload 9
     push 3
     eq
-    jnz bt_meh
+    jnz ft_meh
     push 4
     gstore 11     ; spill -> rage
     ret
-bt_perfect:
+ft_happy:
     push 5
     gstore 11
     ret
-bt_good:
+ft_smile:
     push 6
     gstore 11
     ret
-bt_meh:
+ft_meh:
     push 7
+    gstore 11
+    ret
+ft_go:
+    push 8
     gstore 11
     ret
 
@@ -427,58 +448,8 @@ bt_meh:
 draw:
     cls
 
-    ; ---- медведь ----
-    gload 11
-    jz dr_b0
-    gload 11
-    push 1
-    eq
-    jz dr_b1
-    gload 11
-    push 2
-    eq
-    jz dr_b2
-    gload 11
-    push 3
-    eq
-    jz dr_b3
-    gload 11
-    push 4
-    eq
-    jz dr_b4
-    gload 11
-    push 5
-    eq
-    jz dr_b5
-    gload 11
-    push 6
-    eq
-    jz dr_b6
-    jmp dr_b7
-dr_b0:
-    call draw_b_neutral
-    jmp dr_bear_done
-dr_b1:
-    call draw_b_blink
-    jmp dr_bear_done
-dr_b2:
-    call draw_b_nervous1
-    jmp dr_bear_done
-dr_b3:
-    call draw_b_nervous2
-    jmp dr_bear_done
-dr_b4:
-    call draw_b_rage
-    jmp dr_bear_done
-dr_b5:
-    call draw_b_perfect
-    jmp dr_bear_done
-dr_b6:
-    call draw_b_good
-    jmp dr_bear_done
-dr_b7:
-    call draw_b_meh
-dr_bear_done:
+    ; ---- ЖИВОЕ ЛИЦО (следит за пивом, реагирует на всё) ----
+    call draw_face
 
     ; ---- кран: корпус + ручка по потоку ----
     call draw_tap
@@ -808,6 +779,624 @@ game_over:
 go_no_best:
     ret
 
+; ================= ЛИЦО (процедурное, следит за пивом) =================
+; Кадр лица: голова-скруглённый прямоугольник + глаза с зрачками,
+; зрачки смотрят на уровень пива (beerY), брови/рот по фазе g11.
+draw_face:
+    ; базовая позиция: x=6..42 (w=36), y=10..46 (h=36); rage-тряска
+    push 0
+    gstore 23      ; shakeX = 0
+    gload 11
+    push 4
+    eq
+    jnz df_rage_shake
+    jmp df_base
+df_rage_shake:
+    msec
+    push 50
+    div
+    push 3
+    mod
+    push 2
+    sub
+    gstore 23      ; shakeX = -1..1
+df_base:
+    ; голова: контур (rect x=6+shk, y=10, w=36, h=36)
+    push 6
+    gload 23
+    add
+    push 10
+    push 36
+    push 36
+    push 1
+    rect
+    ; уши-пуха сверху: две дуги
+    push 12
+    gload 23
+    add
+    push 8
+    push 1
+    push 1
+    circ
+    push 36
+    gload 23
+    add
+    push 8
+    push 1
+    push 1
+    circ
+
+    ; ---- глаза: позиция зрачков по фазе ----
+    ; idle: зрачок в центре, смотрит на стакан (вправо-вниз слегка)
+    ; pouring: зрачки едут ВНИЗ с уровнем пива: pupilY = 18 + fill*10/100
+    ; near: + дрожь x
+    ; blink: глаза закрыты (линии)
+    ; rage: X-глаза
+    ; happy: дуги ^^
+    ; meh/go: точки
+    gload 11
+    jz df_eyes_idle
+    gload 11
+    push 1
+    eq
+    jnz df_eyes_blink
+    gload 11
+    push 2
+    eq
+    jnz df_eyes_pour
+    gload 11
+    push 3
+    eq
+    jnz df_eyes_pour
+    gload 11
+    push 4
+    eq
+    jnz df_eyes_rage
+    gload 11
+    push 5
+    eq
+    jnz df_eyes_happy
+    gload 11
+    push 6
+    eq
+    jnz df_eyes_happy
+    jmp df_eyes_go   ; meh + gameover
+
+df_eyes_idle:
+    ; открытые глаза: белки 7x8, зрачки вправо-вниз (смотрит на стакан)
+    ; левый глаз x=12..18, правый x=30..36, y=18..26
+    push 12
+    gload 23
+    add
+    push 18
+    push 7
+    push 8
+    push 1
+    rect
+    push 30
+    gload 23
+    add
+    push 18
+    push 7
+    push 8
+    push 1
+    rect
+    ; зрачки: маленькие 2x3, чуть вправо-вниз
+    push 16
+    gload 23
+    add
+    push 21
+    push 2
+    push 3
+    push 1
+    frect
+    push 34
+    gload 23
+    add
+    push 21
+    push 2
+    push 3
+    push 1
+    frect
+    jmp df_mouth
+
+df_eyes_blink:
+    ; закрытые: линии 7x1
+    push 12
+    gload 23
+    add
+    push 22
+    push 7
+    push 1
+    push 1
+    frect
+    push 30
+    gload 23
+    add
+    push 22
+    push 7
+    push 1
+    push 1
+    frect
+    jmp df_mouth
+
+df_eyes_pour:
+    ; открытые глаза + зрачки следят за пивом: pupilY = 19 + fill*8/100
+    push 12
+    gload 23
+    add
+    push 18
+    push 7
+    push 9
+    push 1
+    rect
+    push 30
+    gload 23
+    add
+    push 18
+    push 7
+    push 9
+    push 1
+    rect
+    ; дрожь зрачков при near-фазе
+    gload 11
+    push 3
+    eq
+    jnz df_pupil_shiver
+    push 0
+    gstore 24      ; jitter = 0
+    jmp df_pupil_draw
+df_pupil_shiver:
+    msec
+    push 30
+    div
+    push 3
+    mod
+    gstore 24      ; jitter 0..2
+df_pupil_draw:
+    ; pupilY = 19 + fill*8/100 (+ jitter по x)
+    gload 0
+    push 8
+    mul
+    push 100
+    div
+    push 19
+    add
+    gstore 25
+    push 16
+    gload 24
+    add
+    gload 23
+    add
+    gload 25
+    push 2
+    push 3
+    push 1
+    frect
+    push 34
+    gload 24
+    add
+    gload 23
+    add
+    gload 25
+    push 2
+    push 3
+    push 1
+    frect
+    ; фаза 3 (у цели): БРОВИ вверх + ПОТ (капли у висков)
+    gload 11
+    push 3
+    eq
+    jnz df_sweat
+    jmp df_mouth
+df_sweat:
+    ; брови: линии над глазами
+    push 12
+    gload 23
+    add
+    push 15
+    push 7
+    push 1
+    push 1
+    frect
+    push 30
+    gload 23
+    add
+    push 15
+    push 7
+    push 1
+    push 1
+    frect
+    ; пот: капли (мигают) у висков
+    msec
+    push 100
+    div
+    push 2
+    mod
+    jnz df_sweat_a
+    push 9
+    gload 23
+    add
+    push 20
+    push 1
+    push 2
+    push 1
+    frect
+    jmp df_mouth
+df_sweat_a:
+    push 42
+    gload 23
+    add
+    push 24
+    push 1
+    push 2
+    push 1
+    frect
+    jmp df_mouth
+
+df_eyes_rage:
+    ; X-глаза: кресты
+    push 12
+    gload 23
+    add
+    push 18
+    push 2
+    push 2
+    push 1
+    frect
+    push 15
+    gload 23
+    add
+    push 18
+    push 2
+    push 2
+    push 1
+    frect
+    push 12
+    gload 23
+    add
+    push 21
+    push 7
+    push 1
+    push 1
+    frect
+    push 12
+    gload 23
+    add
+    push 18
+    push 7
+    push 1
+    push 1
+    frect
+    push 18
+    gload 23
+    add
+    push 18
+    push 1
+    push 7
+    push 1
+    frect
+    ; второй X
+    push 30
+    gload 23
+    add
+    push 18
+    push 2
+    push 2
+    push 1
+    frect
+    push 33
+    gload 23
+    add
+    push 18
+    push 2
+    push 2
+    push 1
+    frect
+    push 30
+    gload 23
+    add
+    push 21
+    push 7
+    push 1
+    push 1
+    frect
+    push 30
+    gload 23
+    add
+    push 18
+    push 7
+    push 1
+    push 1
+    frect
+    push 36
+    gload 23
+    add
+    push 18
+    push 1
+    push 7
+    push 1
+    frect
+    jmp df_mouth
+
+df_eyes_happy:
+    ; дуги ^^: два уголка вверх
+    push 12
+    gload 23
+    add
+    push 22
+    push 1
+    push 1
+    push 1
+    frect
+    push 13
+    gload 23
+    add
+    push 21
+    push 1
+    push 1
+    push 1
+    frect
+    push 14
+    gload 23
+    add
+    push 20
+    push 1
+    push 1
+    push 1
+    frect
+    push 15
+    gload 23
+    add
+    push 20
+    push 1
+    push 1
+    push 1
+    frect
+    push 16
+    gload 23
+    add
+    push 21
+    push 1
+    push 1
+    push 1
+    frect
+    push 17
+    gload 23
+    add
+    push 22
+    push 1
+    push 1
+    push 1
+    frect
+    ; правая дуга
+    push 30
+    gload 23
+    add
+    push 22
+    push 1
+    push 1
+    push 1
+    frect
+    push 31
+    gload 23
+    add
+    push 21
+    push 1
+    push 1
+    push 1
+    frect
+    push 32
+    gload 23
+    add
+    push 20
+    push 1
+    push 1
+    push 1
+    frect
+    push 33
+    gload 23
+    add
+    push 20
+    push 1
+    push 1
+    push 1
+    frect
+    push 34
+    gload 23
+    add
+    push 21
+    push 1
+    push 1
+    push 1
+    frect
+    push 35
+    gload 23
+    add
+    push 22
+    push 1
+    push 1
+    push 1
+    frect
+    jmp df_mouth
+
+df_eyes_go:
+    ; meh/gameover: точки 2x2
+    push 15
+    gload 23
+    add
+    push 21
+    push 2
+    push 2
+    push 1
+    frect
+    push 33
+    gload 23
+    add
+    push 21
+    push 2
+    push 2
+    push 1
+    frect
+    jmp df_mouth
+
+df_mouth:
+    ; ---- рот по фазе ----
+    gload 11
+    push 4
+    eq
+    jnz df_m_rage
+    gload 11
+    push 5
+    eq
+    jnz df_m_happy
+    gload 11
+    push 6
+    eq
+    jnz df_m_happy
+    gload 11
+    push 8
+    eq
+    jnz df_m_go
+    ; idle/pour/blink/near/meh: нейтральная линия 12x1
+    push 18
+    gload 23
+    add
+    push 34
+    push 12
+    push 1
+    push 1
+    frect
+    ret
+df_m_rage:
+    ; открытый ОВАЛ-крик (компактный): r=5
+    push 21
+    gload 23
+    add
+    push 34
+    push 5
+    push 1
+    fcirc
+    push 23
+    gload 23
+    add
+    push 36
+    push 2
+    push 1
+    push 1
+    frect
+    ret
+df_m_happy:
+    ; улыбка: дуга вверх по краям
+    push 17
+    gload 23
+    add
+    push 34
+    push 1
+    push 1
+    push 1
+    frect
+    push 18
+    gload 23
+    add
+    push 35
+    push 1
+    push 1
+    push 1
+    frect
+    push 19
+    gload 23
+    add
+    push 36
+    push 1
+    push 1
+    push 1
+    frect
+    push 20
+    gload 23
+    add
+    push 36
+    push 1
+    push 1
+    push 1
+    frect
+    push 21
+    gload 23
+    add
+    push 36
+    push 1
+    push 1
+    push 1
+    frect
+    push 22
+    gload 23
+    add
+    push 36
+    push 1
+    push 1
+    push 1
+    frect
+    push 23
+    gload 23
+    add
+    push 35
+    push 1
+    push 1
+    push 1
+    frect
+    push 24
+    gload 23
+    add
+    push 34
+    push 1
+    push 1
+    push 1
+    frect
+    ret
+df_m_go:
+    ; gameover: скорбный рот (дуга вниз) + слеза
+    push 18
+    gload 23
+    add
+    push 35
+    push 12
+    push 1
+    push 1
+    frect
+    push 17
+    gload 23
+    add
+    push 36
+    push 1
+    push 1
+    push 1
+    frect
+    push 29
+    gload 23
+    add
+    push 36
+    push 1
+    push 1
+    push 1
+    frect
+    ; слеза (мигает)
+    msec
+    push 200
+    div
+    push 2
+    mod
+    jnz df_m_go_ret
+    push 14
+    gload 23
+    add
+    push 27
+    push 1
+    push 3
+    push 1
+    frect
+df_m_go_ret:
+    ret
+
 ; ================= КРАН (процедурный) =================
 draw_tap:
     ; корпус крана: x 69..79, y 0..6
@@ -842,3996 +1431,6 @@ dt_open:
     push 0
     push 5
     push 2
-    push 1
-    frect
-    ret
-draw_b_neutral:
-    push 29
-    push 2
-    push 3
-    push 1
-    push 1
-    frect
-    push 27
-    push 3
-    push 3
-    push 1
-    push 1
-    frect
-    push 31
-    push 3
-    push 3
-    push 1
-    push 1
-    frect
-    push 8
-    push 4
-    push 8
-    push 1
-    push 1
-    frect
-    push 26
-    push 4
-    push 2
-    push 1
-    push 1
-    frect
-    push 33
-    push 4
-    push 3
-    push 1
-    push 1
-    frect
-    push 6
-    push 5
-    push 3
-    push 1
-    push 1
-    frect
-    push 15
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 20
-    push 5
-    push 4
-    push 1
-    push 1
-    frect
-    push 25
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 6
-    push 2
-    push 1
-    push 1
-    frect
-    push 16
-    push 6
-    push 5
-    push 1
-    push 1
-    frect
-    push 23
-    push 6
-    push 3
-    push 1
-    push 1
-    frect
-    push 36
-    push 6
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 7
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 7
-    push 1
-    push 2
-    push 1
-    frect
-    push 4
-    push 8
-    push 1
-    push 3
-    push 1
-    frect
-    push 36
-    push 9
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 10
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 11
-    push 3
-    push 1
-    push 1
-    frect
-    push 34
-    push 11
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 12
-    push 1
-    push 2
-    push 1
-    frect
-    push 34
-    push 12
-    push 1
-    push 1
-    push 1
-    frect
-    push 34
-    push 13
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 14
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 14
-    push 1
-    push 9
-    push 1
-    frect
-    push 5
-    push 15
-    push 1
-    push 8
-    push 1
-    frect
-    push 5
-    push 23
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 23
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 24
-    push 1
-    push 2
-    push 1
-    frect
-    push 36
-    push 24
-    push 1
-    push 2
-    push 1
-    frect
-    push 6
-    push 26
-    push 2
-    push 1
-    push 1
-    frect
-    push 36
-    push 26
-    push 2
-    push 2
-    push 1
-    frect
-    push 7
-    push 27
-    push 1
-    push 1
-    push 1
-    frect
-    push 7
-    push 28
-    push 2
-    push 1
-    push 1
-    frect
-    push 36
-    push 28
-    push 1
-    push 1
-    push 1
-    frect
-    push 8
-    push 29
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 29
-    push 2
-    push 1
-    push 1
-    frect
-    push 9
-    push 30
-    push 1
-    push 1
-    push 1
-    frect
-    push 35
-    push 30
-    push 1
-    push 3
-    push 1
-    frect
-    push 8
-    push 31
-    push 2
-    push 1
-    push 1
-    frect
-    push 7
-    push 32
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 33
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 33
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 34
-    push 1
-    push 1
-    push 1
-    frect
-    push 36
-    push 34
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 35
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 35
-    push 1
-    push 2
-    push 1
-    frect
-    push 4
-    push 36
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 37
-    push 1
-    push 8
-    push 1
-    frect
-    push 37
-    push 37
-    push 2
-    push 1
-    push 1
-    frect
-    push 38
-    push 38
-    push 1
-    push 7
-    push 1
-    frect
-    push 4
-    push 45
-    push 35
-    push 1
-    push 1
-    frect
-    ret
-draw_b_blink:
-    push 29
-    push 2
-    push 3
-    push 1
-    push 1
-    frect
-    push 27
-    push 3
-    push 3
-    push 1
-    push 1
-    frect
-    push 31
-    push 3
-    push 3
-    push 1
-    push 1
-    frect
-    push 8
-    push 4
-    push 8
-    push 1
-    push 1
-    frect
-    push 26
-    push 4
-    push 2
-    push 1
-    push 1
-    frect
-    push 33
-    push 4
-    push 3
-    push 1
-    push 1
-    frect
-    push 6
-    push 5
-    push 3
-    push 1
-    push 1
-    frect
-    push 15
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 20
-    push 5
-    push 4
-    push 1
-    push 1
-    frect
-    push 25
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 6
-    push 2
-    push 1
-    push 1
-    frect
-    push 16
-    push 6
-    push 5
-    push 1
-    push 1
-    frect
-    push 23
-    push 6
-    push 3
-    push 1
-    push 1
-    frect
-    push 36
-    push 6
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 7
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 7
-    push 1
-    push 2
-    push 1
-    frect
-    push 4
-    push 8
-    push 1
-    push 3
-    push 1
-    frect
-    push 36
-    push 9
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 10
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 11
-    push 3
-    push 1
-    push 1
-    frect
-    push 34
-    push 11
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 12
-    push 1
-    push 2
-    push 1
-    frect
-    push 34
-    push 12
-    push 1
-    push 1
-    push 1
-    frect
-    push 34
-    push 13
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 14
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 14
-    push 1
-    push 9
-    push 1
-    frect
-    push 5
-    push 15
-    push 1
-    push 8
-    push 1
-    frect
-    push 5
-    push 23
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 23
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 24
-    push 1
-    push 2
-    push 1
-    frect
-    push 36
-    push 24
-    push 1
-    push 2
-    push 1
-    frect
-    push 6
-    push 26
-    push 2
-    push 1
-    push 1
-    frect
-    push 36
-    push 26
-    push 2
-    push 2
-    push 1
-    frect
-    push 7
-    push 27
-    push 1
-    push 1
-    push 1
-    frect
-    push 7
-    push 28
-    push 2
-    push 1
-    push 1
-    frect
-    push 36
-    push 28
-    push 1
-    push 1
-    push 1
-    frect
-    push 8
-    push 29
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 29
-    push 2
-    push 1
-    push 1
-    frect
-    push 9
-    push 30
-    push 1
-    push 1
-    push 1
-    frect
-    push 35
-    push 30
-    push 1
-    push 3
-    push 1
-    frect
-    push 8
-    push 31
-    push 2
-    push 1
-    push 1
-    frect
-    push 7
-    push 32
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 33
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 33
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 34
-    push 1
-    push 1
-    push 1
-    frect
-    push 36
-    push 34
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 35
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 35
-    push 1
-    push 2
-    push 1
-    frect
-    push 4
-    push 36
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 37
-    push 1
-    push 8
-    push 1
-    frect
-    push 37
-    push 37
-    push 2
-    push 1
-    push 1
-    frect
-    push 38
-    push 38
-    push 1
-    push 7
-    push 1
-    frect
-    push 4
-    push 45
-    push 35
-    push 1
-    push 1
-    frect
-    ret
-draw_b_nervous1:
-    push 15
-    push 2
-    push 9
-    push 1
-    push 1
-    frect
-    push 12
-    push 3
-    push 4
-    push 1
-    push 1
-    frect
-    push 23
-    push 3
-    push 6
-    push 1
-    push 1
-    frect
-    push 2
-    push 4
-    push 11
-    push 1
-    push 1
-    frect
-    push 28
-    push 4
-    push 3
-    push 1
-    push 1
-    frect
-    push 0
-    push 5
-    push 3
-    push 1
-    push 1
-    frect
-    push 30
-    push 5
-    push 3
-    push 1
-    push 1
-    frect
-    push 45
-    push 5
-    push 1
-    push 1
-    push 1
-    frect
-    push 0
-    push 6
-    push 1
-    push 7
-    push 1
-    frect
-    push 32
-    push 6
-    push 2
-    push 1
-    push 1
-    frect
-    push 44
-    push 6
-    push 2
-    push 2
-    push 1
-    frect
-    push 33
-    push 7
-    push 3
-    push 1
-    push 1
-    frect
-    push 35
-    push 8
-    push 2
-    push 1
-    push 1
-    frect
-    push 43
-    push 8
-    push 3
-    push 1
-    push 1
-    frect
-    push 36
-    push 9
-    push 3
-    push 1
-    push 1
-    frect
-    push 43
-    push 9
-    push 1
-    push 1
-    push 1
-    frect
-    push 45
-    push 9
-    push 1
-    push 1
-    push 1
-    frect
-    push 38
-    push 10
-    push 1
-    push 1
-    push 1
-    frect
-    push 43
-    push 10
-    push 3
-    push 1
-    push 1
-    frect
-    push 38
-    push 11
-    push 2
-    push 2
-    push 1
-    frect
-    push 44
-    push 11
-    push 2
-    push 1
-    push 1
-    frect
-    push 45
-    push 12
-    push 1
-    push 1
-    push 1
-    frect
-    push 0
-    push 13
-    push 4
-    push 1
-    push 1
-    frect
-    push 37
-    push 13
-    push 2
-    push 1
-    push 1
-    frect
-    push 3
-    push 14
-    push 1
-    push 1
-    push 1
-    frect
-    push 37
-    push 14
-    push 1
-    push 1
-    push 1
-    frect
-    push 2
-    push 15
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 15
-    push 2
-    push 1
-    push 1
-    frect
-    push 2
-    push 16
-    push 1
-    push 7
-    push 1
-    frect
-    push 38
-    push 16
-    push 1
-    push 1
-    push 1
-    frect
-    push 38
-    push 17
-    push 2
-    push 1
-    push 1
-    frect
-    push 39
-    push 18
-    push 1
-    push 1
-    push 1
-    frect
-    push 38
-    push 19
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 20
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 21
-    push 1
-    push 3
-    push 1
-    frect
-    push 1
-    push 23
-    push 2
-    push 1
-    push 1
-    frect
-    push 0
-    push 24
-    push 2
-    push 1
-    push 1
-    frect
-    push 36
-    push 24
-    push 2
-    push 1
-    push 1
-    frect
-    push 45
-    push 24
-    push 1
-    push 1
-    push 1
-    frect
-    push 0
-    push 25
-    push 1
-    push 18
-    push 1
-    frect
-    push 36
-    push 25
-    push 1
-    push 2
-    push 1
-    frect
-    push 44
-    push 25
-    push 2
-    push 1
-    push 1
-    frect
-    push 43
-    push 26
-    push 3
-    push 1
-    push 1
-    frect
-    push 35
-    push 27
-    push 2
-    push 1
-    push 1
-    frect
-    push 43
-    push 27
-    push 1
-    push 1
-    push 1
-    frect
-    push 45
-    push 27
-    push 1
-    push 16
-    push 1
-    frect
-    push 34
-    push 28
-    push 2
-    push 1
-    push 1
-    frect
-    push 42
-    push 28
-    push 2
-    push 1
-    push 1
-    frect
-    push 33
-    push 29
-    push 2
-    push 1
-    push 1
-    frect
-    push 42
-    push 29
-    push 1
-    push 3
-    push 1
-    frect
-    push 33
-    push 30
-    push 1
-    push 1
-    push 1
-    frect
-    push 32
-    push 31
-    push 2
-    push 1
-    push 1
-    frect
-    push 31
-    push 32
-    push 2
-    push 1
-    push 1
-    frect
-    push 41
-    push 32
-    push 2
-    push 1
-    push 1
-    frect
-    push 31
-    push 33
-    push 1
-    push 9
-    push 1
-    frect
-    push 41
-    push 33
-    push 1
-    push 10
-    push 1
-    frect
-    push 31
-    push 42
-    push 2
-    push 1
-    push 1
-    frect
-    push 0
-    push 43
-    push 33
-    push 1
-    push 1
-    frect
-    push 41
-    push 43
-    push 5
-    push 1
-    push 1
-    frect
-    ret
-draw_b_nervous2:
-    push 10
-    push 2
-    push 2
-    push 1
-    push 1
-    frect
-    push 7
-    push 3
-    push 8
-    push 1
-    push 1
-    frect
-    push 5
-    push 4
-    push 3
-    push 1
-    push 1
-    frect
-    push 14
-    push 4
-    push 2
-    push 1
-    push 1
-    frect
-    push 20
-    push 4
-    push 7
-    push 1
-    push 1
-    frect
-    push 29
-    push 4
-    push 4
-    push 1
-    push 1
-    frect
-    push 4
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 15
-    push 5
-    push 1
-    push 1
-    push 1
-    frect
-    push 17
-    push 5
-    push 4
-    push 1
-    push 1
-    frect
-    push 26
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 29
-    push 5
-    push 1
-    push 1
-    push 1
-    frect
-    push 32
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 6
-    push 1
-    push 2
-    push 1
-    frect
-    push 15
-    push 6
-    push 3
-    push 1
-    push 1
-    frect
-    push 27
-    push 6
-    push 3
-    push 1
-    push 1
-    frect
-    push 33
-    push 6
-    push 2
-    push 1
-    push 1
-    frect
-    push 34
-    push 7
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 8
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 8
-    push 1
-    push 1
-    push 1
-    frect
-    push 5
-    push 9
-    push 4
-    push 1
-    push 1
-    frect
-    push 34
-    push 9
-    push 2
-    push 1
-    push 1
-    frect
-    push 8
-    push 10
-    push 1
-    push 2
-    push 1
-    frect
-    push 34
-    push 10
-    push 1
-    push 5
-    push 1
-    frect
-    push 7
-    push 12
-    push 2
-    push 1
-    push 1
-    frect
-    push 7
-    push 13
-    push 1
-    push 1
-    push 1
-    frect
-    push 6
-    push 14
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 15
-    push 1
-    push 2
-    push 1
-    frect
-    push 34
-    push 15
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 16
-    push 1
-    push 2
-    push 1
-    frect
-    push 5
-    push 17
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 18
-    push 1
-    push 4
-    push 1
-    frect
-    push 34
-    push 18
-    push 2
-    push 1
-    push 1
-    frect
-    push 33
-    push 19
-    push 2
-    push 1
-    push 1
-    frect
-    push 33
-    push 20
-    push 1
-    push 1
-    push 1
-    frect
-    push 32
-    push 21
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 22
-    push 2
-    push 1
-    push 1
-    frect
-    push 32
-    push 22
-    push 1
-    push 4
-    push 1
-    frect
-    push 6
-    push 23
-    push 1
-    push 2
-    push 1
-    frect
-    push 5
-    push 25
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 26
-    push 1
-    push 4
-    push 1
-    frect
-    push 31
-    push 26
-    push 2
-    push 1
-    push 1
-    frect
-    push 31
-    push 27
-    push 1
-    push 1
-    push 1
-    frect
-    push 29
-    push 28
-    push 3
-    push 1
-    push 1
-    frect
-    push 29
-    push 29
-    push 1
-    push 4
-    push 1
-    frect
-    push 4
-    push 30
-    push 2
-    push 1
-    push 1
-    frect
-    push 40
-    push 30
-    push 1
-    push 1
-    push 1
-    frect
-    push 4
-    push 31
-    push 1
-    push 14
-    push 1
-    frect
-    push 39
-    push 31
-    push 2
-    push 2
-    push 1
-    frect
-    push 28
-    push 33
-    push 2
-    push 1
-    push 1
-    frect
-    push 38
-    push 33
-    push 3
-    push 1
-    push 1
-    frect
-    push 28
-    push 34
-    push 1
-    push 3
-    push 1
-    frect
-    push 38
-    push 34
-    push 1
-    push 9
-    push 1
-    frect
-    push 40
-    push 34
-    push 1
-    push 11
-    push 1
-    frect
-    push 27
-    push 37
-    push 2
-    push 1
-    push 1
-    frect
-    push 27
-    push 38
-    push 1
-    push 7
-    push 1
-    frect
-    push 37
-    push 43
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 44
-    push 1
-    push 1
-    push 1
-    frect
-    push 4
-    push 45
-    push 24
-    push 1
-    push 1
-    frect
-    push 37
-    push 45
-    push 4
-    push 1
-    push 1
-    frect
-    ret
-draw_b_good:
-    push 25
-    push 2
-    push 1
-    push 1
-    push 1
-    frect
-    push 22
-    push 3
-    push 8
-    push 1
-    push 1
-    frect
-    push 21
-    push 4
-    push 2
-    push 1
-    push 1
-    frect
-    push 29
-    push 4
-    push 3
-    push 1
-    push 1
-    frect
-    push 20
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 31
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 20
-    push 6
-    push 1
-    push 1
-    push 1
-    frect
-    push 32
-    push 6
-    push 1
-    push 2
-    push 1
-    frect
-    push 7
-    push 7
-    push 2
-    push 1
-    push 1
-    frect
-    push 17
-    push 7
-    push 4
-    push 1
-    push 1
-    frect
-    push 37
-    push 7
-    push 1
-    push 1
-    push 1
-    frect
-    push 4
-    push 8
-    push 6
-    push 1
-    push 1
-    frect
-    push 15
-    push 8
-    push 3
-    push 1
-    push 1
-    frect
-    push 31
-    push 8
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 8
-    push 2
-    push 1
-    push 1
-    frect
-    push 3
-    push 9
-    push 2
-    push 1
-    push 1
-    frect
-    push 9
-    push 9
-    push 2
-    push 1
-    push 1
-    frect
-    push 12
-    push 9
-    push 4
-    push 1
-    push 1
-    frect
-    push 30
-    push 9
-    push 2
-    push 1
-    push 1
-    frect
-    push 34
-    push 9
-    push 3
-    push 1
-    push 1
-    frect
-    push 3
-    push 10
-    push 1
-    push 8
-    push 1
-    frect
-    push 10
-    push 10
-    push 3
-    push 1
-    push 1
-    frect
-    push 30
-    push 10
-    push 1
-    push 1
-    push 1
-    frect
-    push 35
-    push 10
-    push 3
-    push 1
-    push 1
-    frect
-    push 30
-    push 11
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 11
-    push 1
-    push 1
-    push 1
-    frect
-    push 31
-    push 12
-    push 2
-    push 1
-    push 1
-    frect
-    push 42
-    push 12
-    push 1
-    push 2
-    push 1
-    frect
-    push 32
-    push 13
-    push 2
-    push 1
-    push 1
-    frect
-    push 33
-    push 14
-    push 2
-    push 1
-    push 1
-    frect
-    push 41
-    push 14
-    push 2
-    push 2
-    push 1
-    frect
-    push 34
-    push 15
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 16
-    push 2
-    push 1
-    push 1
-    frect
-    push 42
-    push 16
-    push 1
-    push 2
-    push 1
-    frect
-    push 36
-    push 17
-    push 1
-    push 2
-    push 1
-    frect
-    push 3
-    push 18
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 19
-    push 1
-    push 5
-    push 1
-    frect
-    push 36
-    push 19
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 20
-    push 1
-    push 13
-    push 1
-    frect
-    push 4
-    push 24
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 25
-    push 1
-    push 2
-    push 1
-    frect
-    push 5
-    push 27
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 28
-    push 1
-    push 1
-    push 1
-    frect
-    push 6
-    push 29
-    push 2
-    push 1
-    push 1
-    frect
-    push 7
-    push 30
-    push 1
-    push 2
-    push 1
-    frect
-    push 6
-    push 32
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 33
-    push 3
-    push 1
-    push 1
-    frect
-    push 37
-    push 33
-    push 2
-    push 1
-    push 1
-    frect
-    push 3
-    push 34
-    push 2
-    push 1
-    push 1
-    frect
-    push 38
-    push 34
-    push 1
-    push 3
-    push 1
-    frect
-    push 3
-    push 35
-    push 1
-    push 10
-    push 1
-    frect
-    push 38
-    push 37
-    push 2
-    push 1
-    push 1
-    frect
-    push 39
-    push 38
-    push 1
-    push 7
-    push 1
-    frect
-    push 3
-    push 45
-    push 37
-    push 1
-    push 1
-    frect
-    ret
-draw_b_meh:
-    push 33
-    push 2
-    push 5
-    push 1
-    push 1
-    frect
-    push 4
-    push 3
-    push 11
-    push 1
-    push 1
-    frect
-    push 17
-    push 3
-    push 17
-    push 1
-    push 1
-    frect
-    push 37
-    push 3
-    push 2
-    push 1
-    push 1
-    frect
-    push 3
-    push 4
-    push 2
-    push 1
-    push 1
-    frect
-    push 14
-    push 4
-    push 4
-    push 1
-    push 1
-    frect
-    push 38
-    push 4
-    push 2
-    push 1
-    push 1
-    frect
-    push 3
-    push 5
-    push 1
-    push 4
-    push 1
-    frect
-    push 39
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 40
-    push 6
-    push 1
-    push 1
-    push 1
-    frect
-    push 39
-    push 7
-    push 2
-    push 1
-    push 1
-    frect
-    push 38
-    push 8
-    push 2
-    push 1
-    push 1
-    frect
-    push 3
-    push 9
-    push 3
-    push 1
-    push 1
-    frect
-    push 36
-    push 9
-    push 3
-    push 1
-    push 1
-    frect
-    push 5
-    push 10
-    push 1
-    push 2
-    push 1
-    frect
-    push 36
-    push 10
-    push 1
-    push 1
-    push 1
-    frect
-    push 36
-    push 11
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 12
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 12
-    push 1
-    push 11
-    push 1
-    frect
-    push 4
-    push 13
-    push 1
-    push 3
-    push 1
-    frect
-    push 3
-    push 16
-    push 2
-    push 1
-    push 1
-    frect
-    push 3
-    push 17
-    push 1
-    push 1
-    push 1
-    frect
-    push 3
-    push 18
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 19
-    push 1
-    push 3
-    push 1
-    frect
-    push 4
-    push 22
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 23
-    push 1
-    push 2
-    push 1
-    frect
-    push 37
-    push 23
-    push 2
-    push 1
-    push 1
-    frect
-    push 38
-    push 24
-    push 1
-    push 4
-    push 1
-    frect
-    push 5
-    push 25
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 26
-    push 2
-    push 1
-    push 1
-    frect
-    push 7
-    push 27
-    push 2
-    push 1
-    push 1
-    frect
-    push 8
-    push 28
-    push 1
-    push 2
-    push 1
-    frect
-    push 37
-    push 28
-    push 2
-    push 1
-    push 1
-    frect
-    push 36
-    push 29
-    push 2
-    push 1
-    push 1
-    frect
-    push 7
-    push 30
-    push 2
-    push 1
-    push 1
-    frect
-    push 36
-    push 30
-    push 1
-    push 1
-    push 1
-    frect
-    push 6
-    push 31
-    push 2
-    push 1
-    push 1
-    frect
-    push 36
-    push 31
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 32
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 32
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 33
-    push 2
-    push 1
-    push 1
-    frect
-    push 38
-    push 33
-    push 1
-    push 2
-    push 1
-    frect
-    push 4
-    push 34
-    push 1
-    push 1
-    push 1
-    frect
-    push 3
-    push 35
-    push 2
-    push 1
-    push 1
-    frect
-    push 38
-    push 35
-    push 2
-    push 1
-    push 1
-    frect
-    push 3
-    push 36
-    push 1
-    push 9
-    push 1
-    frect
-    push 39
-    push 36
-    push 1
-    push 2
-    push 1
-    frect
-    push 39
-    push 38
-    push 2
-    push 1
-    push 1
-    frect
-    push 40
-    push 39
-    push 1
-    push 6
-    push 1
-    frect
-    push 3
-    push 45
-    push 38
-    push 1
-    push 1
-    frect
-    ret
-draw_b_perfect:
-    push 15
-    push 2
-    push 1
-    push 2
-    push 1
-    frect
-    push 12
-    push 4
-    push 1
-    push 2
-    push 1
-    frect
-    push 14
-    push 4
-    push 3
-    push 1
-    push 1
-    frect
-    push 14
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 11
-    push 6
-    push 3
-    push 1
-    push 1
-    frect
-    push 15
-    push 6
-    push 1
-    push 1
-    push 1
-    frect
-    push 10
-    push 7
-    push 2
-    push 1
-    push 1
-    frect
-    push 13
-    push 7
-    push 1
-    push 1
-    push 1
-    frect
-    push 26
-    push 7
-    push 1
-    push 2
-    push 1
-    frect
-    push 31
-    push 7
-    push 2
-    push 1
-    push 1
-    frect
-    push 34
-    push 7
-    push 2
-    push 1
-    push 1
-    frect
-    push 11
-    push 8
-    push 3
-    push 1
-    push 1
-    frect
-    push 17
-    push 8
-    push 1
-    push 1
-    push 1
-    frect
-    push 30
-    push 8
-    push 2
-    push 2
-    push 1
-    frect
-    push 33
-    push 8
-    push 3
-    push 1
-    push 1
-    frect
-    push 12
-    push 9
-    push 1
-    push 2
-    push 1
-    frect
-    push 15
-    push 9
-    push 6
-    push 1
-    push 1
-    frect
-    push 25
-    push 9
-    push 3
-    push 1
-    push 1
-    frect
-    push 33
-    push 9
-    push 2
-    push 1
-    push 1
-    frect
-    push 15
-    push 10
-    push 1
-    push 1
-    push 1
-    frect
-    push 20
-    push 10
-    push 1
-    push 2
-    push 1
-    frect
-    push 24
-    push 10
-    push 4
-    push 1
-    push 1
-    frect
-    push 30
-    push 10
-    push 7
-    push 1
-    push 1
-    frect
-    push 14
-    push 11
-    push 2
-    push 1
-    push 1
-    frect
-    push 25
-    push 11
-    push 2
-    push 1
-    push 1
-    frect
-    push 28
-    push 11
-    push 1
-    push 1
-    push 1
-    frect
-    push 30
-    push 11
-    push 1
-    push 1
-    push 1
-    frect
-    push 36
-    push 11
-    push 1
-    push 2
-    push 1
-    frect
-    push 11
-    push 12
-    push 4
-    push 1
-    push 1
-    frect
-    push 20
-    push 12
-    push 2
-    push 1
-    push 1
-    frect
-    push 25
-    push 12
-    push 6
-    push 2
-    push 1
-    frect
-    push 5
-    push 13
-    push 3
-    push 1
-    push 1
-    frect
-    push 9
-    push 13
-    push 3
-    push 1
-    push 1
-    frect
-    push 21
-    push 13
-    push 1
-    push 1
-    push 1
-    frect
-    push 33
-    push 13
-    push 4
-    push 1
-    push 1
-    frect
-    push 3
-    push 14
-    push 3
-    push 1
-    push 1
-    frect
-    push 7
-    push 14
-    push 3
-    push 1
-    push 1
-    frect
-    push 21
-    push 14
-    push 2
-    push 1
-    push 1
-    frect
-    push 28
-    push 14
-    push 1
-    push 2
-    push 1
-    frect
-    push 30
-    push 14
-    push 1
-    push 6
-    push 1
-    frect
-    push 33
-    push 14
-    push 1
-    push 1
-    push 1
-    frect
-    push 35
-    push 14
-    push 3
-    push 1
-    push 1
-    frect
-    push 3
-    push 15
-    push 1
-    push 5
-    push 1
-    frect
-    push 22
-    push 15
-    push 3
-    push 1
-    push 1
-    frect
-    push 33
-    push 15
-    push 4
-    push 1
-    push 1
-    frect
-    push 41
-    push 15
-    push 1
-    push 5
-    push 1
-    frect
-    push 24
-    push 16
-    push 3
-    push 1
-    push 1
-    frect
-    push 34
-    push 16
-    push 2
-    push 1
-    push 1
-    frect
-    push 26
-    push 17
-    push 1
-    push 1
-    push 1
-    frect
-    push 34
-    push 17
-    push 1
-    push 2
-    push 1
-    frect
-    push 26
-    push 18
-    push 2
-    push 1
-    push 1
-    frect
-    push 27
-    push 19
-    push 2
-    push 1
-    push 1
-    frect
-    push 34
-    push 19
-    push 2
-    push 1
-    push 1
-    frect
-    push 3
-    push 20
-    push 3
-    push 1
-    push 1
-    frect
-    push 28
-    push 20
-    push 1
-    push 3
-    push 1
-    frect
-    push 30
-    push 20
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 20
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 21
-    push 1
-    push 3
-    push 1
-    frect
-    push 31
-    push 21
-    push 1
-    push 8
-    push 1
-    frect
-    push 36
-    push 21
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 22
-    push 1
-    push 1
-    push 1
-    frect
-    push 28
-    push 23
-    push 2
-    push 1
-    push 1
-    frect
-    push 37
-    push 23
-    push 2
-    push 1
-    push 1
-    frect
-    push 5
-    push 24
-    push 2
-    push 1
-    push 1
-    frect
-    push 29
-    push 24
-    push 1
-    push 5
-    push 1
-    frect
-    push 38
-    push 24
-    push 1
-    push 1
-    push 1
-    frect
-    push 6
-    push 25
-    push 1
-    push 2
-    push 1
-    frect
-    push 38
-    push 25
-    push 2
-    push 1
-    push 1
-    frect
-    push 39
-    push 26
-    push 1
-    push 2
-    push 1
-    frect
-    push 6
-    push 27
-    push 2
-    push 1
-    push 1
-    frect
-    push 7
-    push 28
-    push 1
-    push 6
-    push 1
-    frect
-    push 39
-    push 28
-    push 2
-    push 1
-    push 1
-    frect
-    push 29
-    push 29
-    push 3
-    push 1
-    push 1
-    frect
-    push 40
-    push 29
-    push 1
-    push 6
-    push 1
-    frect
-    push 7
-    push 34
-    push 2
-    push 1
-    push 1
-    frect
-    push 8
-    push 35
-    push 1
-    push 1
-    push 1
-    frect
-    push 39
-    push 35
-    push 2
-    push 1
-    push 1
-    frect
-    push 7
-    push 36
-    push 2
-    push 1
-    push 1
-    frect
-    push 38
-    push 36
-    push 2
-    push 1
-    push 1
-    frect
-    push 7
-    push 37
-    push 1
-    push 1
-    push 1
-    frect
-    push 37
-    push 37
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 38
-    push 2
-    push 1
-    push 1
-    frect
-    push 35
-    push 38
-    push 3
-    push 1
-    push 1
-    frect
-    push 5
-    push 39
-    push 2
-    push 1
-    push 1
-    frect
-    push 33
-    push 39
-    push 3
-    push 1
-    push 1
-    frect
-    push 4
-    push 40
-    push 2
-    push 1
-    push 1
-    frect
-    push 32
-    push 40
-    push 2
-    push 1
-    push 1
-    frect
-    push 4
-    push 41
-    push 1
-    push 2
-    push 1
-    frect
-    push 32
-    push 41
-    push 1
-    push 1
-    push 1
-    frect
-    push 32
-    push 42
-    push 2
-    push 1
-    push 1
-    frect
-    push 3
-    push 43
-    push 2
-    push 1
-    push 1
-    frect
-    push 33
-    push 43
-    push 1
-    push 2
-    push 1
-    frect
-    push 3
-    push 44
-    push 1
-    push 1
-    push 1
-    frect
-    push 3
-    push 45
-    push 32
-    push 1
-    push 1
-    frect
-    ret
-draw_b_rage:
-    push 26
-    push 2
-    push 2
-    push 1
-    push 1
-    frect
-    push 24
-    push 3
-    push 5
-    push 1
-    push 1
-    frect
-    push 24
-    push 4
-    push 1
-    push 1
-    push 1
-    frect
-    push 28
-    push 4
-    push 1
-    push 1
-    push 1
-    frect
-    push 17
-    push 5
-    push 8
-    push 1
-    push 1
-    frect
-    push 27
-    push 5
-    push 2
-    push 1
-    push 1
-    frect
-    push 11
-    push 6
-    push 2
-    push 1
-    push 1
-    frect
-    push 15
-    push 6
-    push 3
-    push 1
-    push 1
-    frect
-    push 27
-    push 6
-    push 1
-    push 1
-    push 1
-    frect
-    push 33
-    push 6
-    push 5
-    push 1
-    push 1
-    frect
-    push 9
-    push 7
-    push 4
-    push 1
-    push 1
-    frect
-    push 14
-    push 7
-    push 2
-    push 1
-    push 1
-    frect
-    push 27
-    push 7
-    push 7
-    push 1
-    push 1
-    frect
-    push 35
-    push 7
-    push 1
-    push 1
-    push 1
-    frect
-    push 8
-    push 8
-    push 2
-    push 1
-    push 1
-    frect
-    push 12
-    push 8
-    push 3
-    push 1
-    push 1
-    frect
-    push 35
-    push 8
-    push 4
-    push 1
-    push 1
-    frect
-    push 8
-    push 9
-    push 1
-    push 2
-    push 1
-    frect
-    push 33
-    push 9
-    push 5
-    push 1
-    push 1
-    frect
-    push 31
-    push 10
-    push 3
-    push 1
-    push 1
-    frect
-    push 37
-    push 10
-    push 3
-    push 1
-    push 1
-    frect
-    push 8
-    push 11
-    push 3
-    push 1
-    push 1
-    frect
-    push 31
-    push 11
-    push 1
-    push 1
-    push 1
-    frect
-    push 33
-    push 11
-    push 4
-    push 1
-    push 1
-    frect
-    push 10
-    push 12
-    push 1
-    push 3
-    push 1
-    frect
-    push 30
-    push 12
-    push 3
-    push 1
-    push 1
-    frect
-    push 35
-    push 12
-    push 4
-    push 1
-    push 1
-    frect
-    push 30
-    push 13
-    push 1
-    push 5
-    push 1
-    frect
-    push 8
-    push 15
-    push 3
-    push 1
-    push 1
-    frect
-    push 7
-    push 16
-    push 2
-    push 1
-    push 1
-    frect
-    push 6
-    push 17
-    push 3
-    push 1
-    push 1
-    frect
-    push 8
-    push 18
-    push 1
-    push 1
-    push 1
-    frect
-    push 30
-    push 18
-    push 2
-    push 1
-    push 1
-    frect
-    push 7
-    push 19
-    push 3
-    push 1
-    push 1
-    frect
-    push 31
-    push 19
-    push 1
-    push 15
-    push 1
-    frect
-    push 6
-    push 20
-    push 2
-    push 1
-    push 1
-    frect
-    push 9
-    push 20
-    push 1
-    push 1
-    push 1
-    frect
-    push 5
-    push 21
-    push 2
-    push 1
-    push 1
-    frect
-    push 8
-    push 21
-    push 3
-    push 1
-    push 1
-    frect
-    push 10
-    push 22
-    push 2
-    push 1
-    push 1
-    frect
-    push 11
-    push 23
-    push 1
-    push 6
-    push 1
-    frect
-    push 11
-    push 29
-    push 2
-    push 1
-    push 1
-    frect
-    push 12
-    push 30
-    push 1
-    push 15
-    push 1
-    frect
-    push 30
-    push 34
-    push 2
-    push 1
-    push 1
-    frect
-    push 30
-    push 35
-    push 1
-    push 4
-    push 1
-    frect
-    push 30
-    push 39
-    push 2
-    push 1
-    push 1
-    frect
-    push 31
-    push 40
-    push 1
-    push 3
-    push 1
-    frect
-    push 31
-    push 43
-    push 2
-    push 1
-    push 1
-    frect
-    push 32
-    push 44
-    push 1
-    push 1
-    push 1
-    frect
-    push 12
-    push 45
-    push 21
-    push 1
-    push 1
-    frect
-    ret
-    push 4
-    push 0
-    push 10
-    push 1
-    push 1
-    frect
-    push 1
-    push 1
-    push 17
-    push 1
-    push 1
-    frect
-    push 26
-    push 1
-    push 1
-    push 1
-    push 1
-    frect
-    push 0
-    push 2
-    push 5
-    push 1
-    push 1
-    frect
-    push 13
-    push 2
-    push 7
-    push 1
-    push 1
-    frect
-    push 24
-    push 2
-    push 3
-    push 2
-    push 1
-    frect
-    push 0
-    push 3
-    push 4
-    push 1
-    push 1
-    frect
-    push 14
-    push 3
-    push 7
-    push 1
-    push 1
-    frect
-    push 0
-    push 4
-    push 21
-    push 1
-    push 1
-    frect
-    push 24
-    push 4
-    push 2
-    push 3
-    push 1
-    frect
-    push 18
-    push 5
-    push 3
-    push 2
-    push 1
-    frect
-    push 19
-    push 7
-    push 2
-    push 2
-    push 1
-    frect
-    push 23
-    push 7
-    push 3
-    push 1
-    push 1
-    frect
-    push 23
-    push 8
-    push 2
-    push 7
-    push 1
-    frect
-    push 19
-    push 9
-    push 3
-    push 1
-    push 1
-    frect
-    push 20
-    push 10
-    push 2
-    push 5
-    push 1
-    frect
-    push 19
-    push 15
-    push 3
-    push 1
-    push 1
-    frect
-    push 23
-    push 15
-    push 3
-    push 1
-    push 1
-    frect
-    push 19
-    push 16
-    push 2
-    push 1
-    push 1
-    frect
-    push 24
-    push 16
-    push 2
-    push 1
-    push 1
-    frect
-    push 18
-    push 17
-    push 3
-    push 1
-    push 1
-    frect
-    push 24
-    push 17
-    push 3
-    push 1
-    push 1
-    frect
-    push 17
-    push 18
-    push 3
-    push 2
-    push 1
-    frect
-    push 25
-    push 18
-    push 2
-    push 3
-    push 1
-    frect
-    push 0
-    push 20
-    push 1
-    push 5
-    push 1
-    frect
-    push 17
-    push 20
-    push 2
-    push 4
-    push 1
-    frect
-    push 26
-    push 21
-    push 1
-    push 6
-    push 1
-    frect
-    push 16
-    push 24
-    push 3
-    push 1
-    push 1
-    frect
-    push 0
-    push 25
-    push 2
-    push 9
-    push 1
-    frect
-    push 16
-    push 25
-    push 2
-    push 8
-    push 1
-    frect
-    push 15
-    push 33
-    push 2
-    push 5
-    push 1
-    frect
-    push 0
-    push 34
-    push 3
-    push 3
-    push 1
-    frect
-    push 1
-    push 37
-    push 2
-    push 1
-    push 1
-    frect
-    push 1
-    push 38
-    push 7
-    push 1
-    push 1
-    frect
-    push 10
-    push 38
-    push 7
-    push 1
-    push 1
-    frect
-    push 2
-    push 39
-    push 14
-    push 1
-    push 1
-    frect
-    ret
-    push 7
-    push 0
-    push 6
-    push 1
-    push 1
-    frect
-    push 3
-    push 1
-    push 15
-    push 1
-    push 1
-    frect
-    push 2
-    push 2
-    push 5
-    push 1
-    push 1
-    frect
-    push 13
-    push 2
-    push 5
-    push 1
-    push 1
-    frect
-    push 2
-    push 3
-    push 16
-    push 1
-    push 1
-    frect
-    push 2
-    push 4
-    push 3
-    push 14
-    push 1
-    frect
-    push 15
-    push 4
-    push 3
-    push 36
-    push 1
-    frect
-    push 3
-    push 18
-    push 2
-    push 22
-    push 1
-    frect
-    push 3
-    push 40
-    push 15
-    push 1
-    push 1
-    frect
-    ret
-    push 6
-    push 0
-    push 15
-    push 1
-    push 1
-    frect
-    push 3
-    push 1
-    push 21
-    push 1
-    push 1
-    frect
-    push 0
-    push 2
-    push 32
-    push 1
-    push 1
-    frect
-    push 37
-    push 2
-    push 5
-    push 1
-    push 1
-    frect
-    push 0
-    push 3
-    push 6
-    push 1
-    push 1
-    frect
-    push 20
-    push 3
-    push 13
-    push 1
-    push 1
-    frect
-    push 36
-    push 3
-    push 6
-    push 1
-    push 1
-    frect
-    push 27
-    push 4
-    push 7
-    push 1
-    push 1
-    frect
-    push 37
-    push 4
-    push 5
-    push 2
-    push 1
-    frect
-    push 0
-    push 5
-    push 34
-    push 2
-    push 1
-    frect
-    push 37
-    push 6
-    push 3
-    push 2
-    push 1
-    frect
-    push 41
-    push 6
-    push 1
-    push 1
-    push 1
-    frect
-    push 3
-    push 7
-    push 21
-    push 1
-    push 1
-    frect
-    push 30
-    push 7
-    push 4
-    push 1
-    push 1
-    frect
-    push 30
-    push 8
-    push 3
-    push 2
-    push 1
-    frect
-    push 37
-    push 8
-    push 4
-    push 1
-    push 1
-    frect
-    push 38
-    push 9
-    push 3
-    push 4
-    push 1
-    frect
-    push 29
-    push 10
-    push 4
-    push 3
-    push 1
-    frect
-    push 28
-    push 13
-    push 4
-    push 4
-    push 1
-    frect
-    push 38
-    push 13
-    push 4
-    push 1
-    push 1
-    frect
-    push 39
-    push 14
-    push 3
-    push 4
-    push 1
-    frect
-    push 27
-    push 17
-    push 4
-    push 4
-    push 1
-    frect
-    push 40
-    push 18
-    push 2
-    push 4
-    push 1
-    frect
-    push 26
-    push 21
-    push 5
-    push 1
-    push 1
-    frect
-    push 0
-    push 22
-    push 1
-    push 2
-    push 1
-    frect
-    push 26
-    push 22
-    push 4
-    push 3
-    push 1
-    frect
-    push 41
-    push 22
-    push 1
-    push 5
-    push 1
-    frect
-    push 0
-    push 24
-    push 2
-    push 4
-    push 1
-    frect
-    push 25
-    push 25
-    push 4
-    push 1
-    push 1
-    frect
-    push 25
-    push 26
-    push 3
-    push 2
-    push 1
-    frect
-    push 0
-    push 28
-    push 3
-    push 4
-    push 1
-    frect
-    push 24
-    push 28
-    push 4
-    push 2
-    push 1
-    frect
-    push 24
-    push 30
-    push 3
-    push 3
-    push 1
-    frect
-    push 0
-    push 32
-    push 4
-    push 1
-    push 1
-    frect
-    push 0
-    push 33
-    push 27
-    push 1
-    push 1
-    frect
-    push 2
-    push 34
-    push 23
-    push 1
-    push 1
-    frect
-    push 6
-    push 35
-    push 15
-    push 1
-    push 1
-    frect
-    ret
-    push 2
-    push 0
-    push 11
-    push 1
-    push 1
-    frect
-    push 0
-    push 1
-    push 15
-    push 1
-    push 1
-    frect
-    push 0
-    push 2
-    push 3
-    push 1
-    push 1
-    frect
-    push 12
-    push 2
-    push 10
-    push 1
-    push 1
-    frect
-    push 1
-    push 3
-    push 2
-    push 1
-    push 1
-    frect
-    push 14
-    push 3
-    push 14
-    push 1
-    push 1
-    frect
-    push 2
-    push 4
-    push 1
-    push 1
-    push 1
-    frect
-    push 4
-    push 4
-    push 2
-    push 1
-    push 1
-    frect
-    push 24
-    push 4
-    push 4
-    push 1
-    push 1
-    frect
-    push 2
-    push 5
-    push 26
-    push 1
-    push 1
-    frect
-    push 2
-    push 6
-    push 2
-    push 3
-    push 1
-    frect
-    push 8
-    push 6
-    push 14
-    push 1
-    push 1
-    frect
-    push 26
-    push 6
-    push 2
-    push 2
-    push 1
-    frect
-    push 24
-    push 7
-    push 1
-    push 1
-    push 1
-    frect
-    push 23
-    push 8
-    push 5
-    push 1
-    push 1
-    frect
-    push 2
-    push 9
-    push 3
-    push 5
-    push 1
-    frect
-    push 23
-    push 9
-    push 1
-    push 1
-    push 1
-    frect
-    push 26
-    push 9
-    push 3
-    push 1
-    push 1
-    frect
-    push 28
-    push 10
-    push 1
-    push 2
-    push 1
-    frect
-    push 23
-    push 11
-    push 4
-    push 1
-    push 1
-    frect
-    push 24
-    push 12
-    push 3
-    push 1
-    push 1
-    frect
-    push 25
-    push 13
-    push 2
-    push 9
-    push 1
-    frect
-    push 3
-    push 14
-    push 2
-    push 6
-    push 1
-    frect
-    push 28
-    push 16
-    push 1
-    push 9
-    push 1
-    frect
-    push 3
-    push 20
-    push 3
-    push 6
-    push 1
-    frect
-    push 24
-    push 22
-    push 2
-    push 6
-    push 1
-    frect
-    push 27
-    push 25
-    push 2
-    push 5
-    push 1
-    frect
-    push 4
-    push 26
-    push 2
-    push 8
-    push 1
-    frect
-    push 22
-    push 28
-    push 4
-    push 1
-    push 1
-    frect
-    push 22
-    push 29
-    push 1
-    push 2
-    push 1
-    frect
-    push 26
-    push 30
-    push 3
-    push 1
-    push 1
-    frect
-    push 24
-    push 31
-    push 4
-    push 1
-    push 1
-    frect
-    push 22
-    push 32
-    push 4
-    push 1
-    push 1
-    frect
-    push 24
-    push 33
-    push 2
-    push 2
-    push 1
-    frect
-    push 4
-    push 34
-    push 3
-    push 5
-    push 1
-    frect
-    push 23
-    push 35
-    push 3
-    push 4
-    push 1
-    frect
-    push 5
-    push 39
-    push 21
-    push 1
-    push 1
-    frect
-    push 6
-    push 40
-    push 18
-    push 1
-    push 1
-    frect
-    ret
-    push 9
-    push 0
-    push 8
-    push 1
-    push 1
-    frect
-    push 6
-    push 1
-    push 16
-    push 1
-    push 1
-    frect
-    push 5
-    push 2
-    push 21
-    push 1
-    push 1
-    frect
-    push 4
-    push 3
-    push 23
-    push 1
-    push 1
-    frect
-    push 3
-    push 4
-    push 24
-    push 1
-    push 1
-    frect
-    push 2
-    push 5
-    push 25
-    push 2
-    push 1
-    frect
-    push 2
-    push 7
-    push 24
-    push 1
-    push 1
-    frect
-    push 1
-    push 8
-    push 25
-    push 3
-    push 1
-    frect
-    push 1
-    push 11
-    push 26
-    push 5
-    push 1
-    frect
-    push 2
-    push 16
-    push 25
-    push 2
-    push 1
-    frect
-    push 2
-    push 18
-    push 24
-    push 1
-    push 1
-    frect
-    push 3
-    push 19
-    push 23
-    push 1
-    push 1
-    frect
-    push 3
-    push 20
-    push 22
-    push 2
-    push 1
-    frect
-    push 4
-    push 22
-    push 21
-    push 1
-    push 1
-    frect
-    push 4
-    push 23
-    push 20
-    push 7
-    push 1
-    frect
-    push 4
-    push 30
-    push 19
-    push 2
-    push 1
-    frect
-    push 5
-    push 32
-    push 18
-    push 4
-    push 1
-    frect
-    push 4
-    push 36
-    push 22
-    push 1
-    push 1
-    frect
-    push 2
-    push 37
-    push 25
-    push 1
-    push 1
-    frect
-    push 1
-    push 38
-    push 25
-    push 1
-    push 1
-    frect
-    push 3
-    push 39
-    push 22
-    push 1
-    push 1
-    frect
-    ret
-    push 8
-    push 0
-    push 1
-    push 1
-    push 1
-    frect
-    push 5
-    push 1
-    push 8
-    push 1
-    push 1
-    frect
-    push 3
-    push 2
-    push 12
-    push 1
-    push 1
-    frect
-    push 2
-    push 3
-    push 14
-    push 3
-    push 1
-    frect
-    push 2
-    push 6
-    push 13
-    push 11
-    push 1
-    frect
-    push 3
-    push 17
-    push 12
-    push 20
-    push 1
-    frect
-    push 3
-    push 37
-    push 13
-    push 1
-    push 1
-    frect
-    push 2
-    push 38
-    push 15
-    push 1
-    push 1
-    frect
-    push 0
-    push 39
-    push 17
-    push 1
-    push 1
-    frect
-    push 0
-    push 40
-    push 15
-    push 1
-    push 1
-    frect
-    ret
-    push 14
-    push 0
-    push 2
-    push 1
-    push 1
-    frect
-    push 8
-    push 1
-    push 21
-    push 1
-    push 1
-    frect
-    push 6
-    push 2
-    push 29
-    push 1
-    push 1
-    frect
-    push 5
-    push 3
-    push 33
-    push 1
-    push 1
-    frect
-    push 3
-    push 4
-    push 39
-    push 2
-    push 1
-    frect
-    push 2
-    push 6
-    push 40
-    push 3
-    push 1
-    frect
-    push 2
-    push 9
-    push 39
-    push 2
-    push 1
-    frect
-    push 2
-    push 11
-    push 38
-    push 1
-    push 1
-    frect
-    push 2
-    push 12
-    push 37
-    push 1
-    push 1
-    frect
-    push 3
-    push 13
-    push 36
-    push 1
-    push 1
-    frect
-    push 4
-    push 14
-    push 35
-    push 2
-    push 1
-    frect
-    push 4
-    push 16
-    push 34
-    push 4
-    push 1
-    frect
-    push 4
-    push 20
-    push 33
-    push 4
-    push 1
-    frect
-    push 5
-    push 24
-    push 32
-    push 1
-    push 1
-    frect
-    push 5
-    push 25
-    push 31
-    push 3
-    push 1
-    frect
-    push 5
-    push 28
-    push 30
-    push 2
-    push 1
-    frect
-    push 6
-    push 30
-    push 29
-    push 1
-    push 1
-    frect
-    push 6
-    push 31
-    push 28
-    push 1
-    push 1
-    frect
-    push 3
-    push 32
-    push 31
-    push 1
-    push 1
-    frect
-    push 2
-    push 33
-    push 32
-    push 1
-    push 1
-    frect
-    push 1
-    push 34
-    push 33
-    push 1
-    push 1
-    frect
-    push 1
-    push 35
-    push 30
-    push 1
-    push 1
-    frect
-    ret
-    push 7
-    push 0
-    push 8
-    push 1
-    push 1
-    frect
-    push 3
-    push 1
-    push 16
-    push 1
-    push 1
-    frect
-    push 1
-    push 2
-    push 25
-    push 1
-    push 1
-    frect
-    push 1
-    push 3
-    push 27
-    push 1
-    push 1
-    frect
-    push 0
-    push 4
-    push 29
-    push 2
-    push 1
-    frect
-    push 1
-    push 6
-    push 28
-    push 2
-    push 1
-    frect
-    push 1
-    push 8
-    push 27
-    push 3
-    push 1
-    frect
-    push 1
-    push 11
-    push 28
-    push 14
-    push 1
-    frect
-    push 2
-    push 25
-    push 27
-    push 7
-    push 1
-    frect
-    push 2
-    push 32
-    push 25
-    push 1
-    push 1
-    frect
-    push 2
-    push 33
-    push 24
-    push 3
-    push 1
-    frect
-    push 1
-    push 36
-    push 25
-    push 2
-    push 1
-    frect
-    push 1
-    push 38
-    push 27
-    push 2
-    push 1
-    frect
-    push 1
-    push 40
-    push 26
-    push 1
     push 1
     frect
     ret
