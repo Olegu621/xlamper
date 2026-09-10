@@ -1,45 +1,49 @@
 ; ==================================================================
-; ROOT BEAR — бар root beer для C3 XLAMPER (XLA VM v2)
-; ==================================================================
-; Клиенты-зверята заказывают кружку root beer.
-;   Стик <- ->  : наклон кувшина (0..3) — поток налива
-;   Стик up/down: высота кувшина над кружкой — пена (больше высота = больше пены)
-;   Клик        : подать кружку / следующий клиент
-;   Удержание   : выход
-; Оценка: |fill - target| <= 5 -> PERFECT (+3, streak)
-;         |fill - target| <= 15 -> GOOD (+1)
-;         иначе BAD (streak=0)
-; Серия PERFECT x2+ даёт бонус. Рекорд в NVS.
+; ROOT BEAR — порт Playdate-игры FOF "Root Bear" для C3 XLAMPER
+; Спрайты медведей и кружки взяты из оригинального .pdx (1:1 стиль).
+;
+; МЕХАНИКА НАЛИВА (аналоговая!):
+;   Стик вниз  = наклон кувшина: чем ниже, тем СИЛЬНЕЕ поток
+;     лёгкий наклон  -> тонкая струя, точный контроль
+;     полное отклонение -> мощный поток, риск перелива
+;   Пиво поднимается, пена растёт (пена = быстрее при сильном потоке)
+;   Перелив через край = провал заказа
+;   Клик = подать кружку медведю -> оценка по точности
+;   Удержание клика = выход
+;
+; Оценки: PERFECT (+3), GOOD (+1), MEH (0), RAGE (-1, пролил)
+; Рекорд в NVS. Каждый заказ: целевая линия случайная.
 ; ==================================================================
 .title ROOTBEAR
 .data 40
-; g0=fill     уровень кружки (0..100)
-; g1=foam     пена (0..100)
-; g2=tilt     наклон кувшина 0..3
-; g3=lvl      высота кувшина 0..3
-; g4=score
-; g5=best
-; g6=state 0=order,1=pour,2=grade
-; g7=target   цель заказа 30..80
-; g8=streak
-; g9=animT
-; g10=customer 0..3 (мишка/зайка/котик/утка)
-; g11=rounds
-; g12..g15: пузыри пены (фазы)
-; g16=spill   брызги счётчик
-; g17=serveAnim
+; g0=fill    уровень пива 0..100
+; g1=foam    пена 0..100 (нельзя подавать пока пена > 20 — осядет)
+; g2=flow    текущий поток 0..100 (от стика)
+; g3=score
+; g4=best
+; g5=state   0=order,1=pour,2=grade,3=spill
+; g6=target  целевой уровень 30..85
+; g7=streak
+; g8=t       таймер анимации
+; g9=client  0..5 (какой медведь)
+; g10=blinkT таймер моргания
+; g11=tipX   X струи (постоянна)
+; g12=wob    фаза колебания струи
+; g13=foamRate накопление пены
 
 .str S1 ROOT BEAR
 .str S2 ORDER:
-.str S3 FILL
+.str S3 POUR!
 .str S4 PERFECT!
 .str S5 GOOD
-.str S6 BAD...
-.str S7 SC
-.str S8 BEST
-.str S9 click=serve
-.str SA hold=exit
-.str SB STREAK
+.str S6 MEH
+.str S7 RAGE!
+.str S8 SPILL!
+.str S9 SC
+.str SA BEST
+.str SB SERVE
+.str SC HOLD STICK DOWN TO POUR
+.str SD CLICK=SERVE HOLD=EXIT
 .str K1 best
 
 ; ================= init =================
@@ -50,92 +54,21 @@ start:
     gstore 1
     push 0
     gstore 2
-    push 1
+    push 0
     gstore 3
     push 0
-    gstore 4
-    push 0
-    gstore 8
-    push 0
-    gstore 11
-    push 0
-    gstore 16
+    gstore 7
     load K1 0
-    gstore 5
+    gstore 4
     call new_order
 
 ; ================= main loop =================
-main_loop:
+main:
     frame
+    msec
+    gstore 8
 
-    ; ---- input: tilt (left/right) ----
-    stick
-    dup
-    push 2
-    eq
-    jnz in_tilt_up
-    dup
-    push 6
-    eq
-    jnz in_tilt_dn
-    dup
-    push 0
-    eq
-    jnz in_h_up
-    dup
-    push 4
-    eq
-    jnz in_h_dn
-    drop
-    jmp in_done
-in_tilt_up:
-    drop
-    gload 2
-    push 3
-    lt
-    jz tilt_cap
-    gload 2
-    push 1
-    add
-    gstore 2
-tilt_cap:
-    jmp in_done
-in_tilt_dn:
-    drop
-    gload 2
-    jz tilt_floor
-    gload 2
-    push 1
-    sub
-    gstore 2
-tilt_floor:
-    jmp in_done
-in_h_up:
-    drop
-    gload 3
-    push 3
-    lt
-    jz h_cap
-    gload 3
-    push 1
-    add
-    gstore 3
-h_cap:
-    jmp in_done
-in_h_dn:
-    drop
-    gload 3
-    push 1
-    gt
-    jz h_floor
-    gload 3
-    push 1
-    sub
-    gstore 3
-h_floor:
-in_done:
-
-    ; ---- events ----
+    ; ---- события ----
     event
     dup
     push 6
@@ -154,730 +87,1882 @@ ev_exit:
 
 ev_click:
     drop
-    gload 6
-    jz a_pour
-    gload 6
+    gload 5
+    jnz st_click_next
+    jmp st_click_pour
+st_click_next:
+    gload 5
     push 1
-    eq
-    jnz a_serve
-    ; state==2 -> next customer
+    sub
+    jz st_serve        ; state==1: подать кружку
+    ; state 2 (оценка) / 3 (spill): СЛЕДУЮЩИЙ ЗАКАЗ
     call new_order
     jmp physics
-
-a_pour:
-    push 1
-    gstore 6
-    beep 900 60
+st_serve:
+    call grade_serve
     jmp physics
-
-a_serve:
-    call grade
-    jmp physics
-
-; ================= physics =================
-physics:
-    gload 6
+st_click_pour:
     push 1
-    eq
-    jnz pouring
-    msec
-    push 200
-    mod
-    gstore 9
-    jmp draw
-
-pouring:
-    ; поток: fill += tilt*3
-    gload 0
-    gload 2
-    push 3
-    mul
-    add
-    dup
-    push 100
-    gt
-    jz cap_f
-    drop
-    push 100
-cap_f:
-    gstore 0
-    ; пена: пропорционально высоте и потоку
-    gload 1
-    gload 3
-    push 2
-    mul
-    add
-    dup
-    push 100
-    gt
-    jz cap_fm
-    drop
-    push 100
-cap_fm:
-    gstore 1
-    ; брызги при tilt==3
-    gload 2
-    push 3
-    eq
-    jnz do_spill
+    gstore 5
     push 0
-    gstore 16
-    jmp phys_done
-do_spill:
-    gload 16
+    gstore 0
+    push 0
+    gstore 1
+    push 0
+    gstore 13
+    beep 900 50
+    jmp physics
+
+; ================= physics: аналоговый налив =================
+physics:
+    gload 5
+    push 1
+    eq
+    jnz pour_active
+    jmp blink_tick
+
+pour_active:
+    ; АНАЛОГ: sty 2048(центр)..4095(вниз) -> поток 0..100
+    sty
+    push 2300
+    sub              ; 0..1795 (мёртвая зона до 2300)
+    dup
+    push 0
+    lt
+    jnz flow_zero
+    ; масштаб: 1795 -> 100
+    push 18
+    div              ; 0..99
+    dup
+    push 0
+    gt
+    jnz flow_ok
+    drop
+    push 0
+flow_ok:
+    gstore 2
+    jmp flow_apply
+flow_zero:
+    drop             ; съесть остаток v (dup-копию съел lt)
+    push 0
+    gstore 2
+flow_apply:
+
+    ; налив: fill += flow/12 за кадр
+    gload 2
+    push 12
+    div
+    gload 0
+    add
+    push 100
+    min
+    gstore 0
+
+    ; пена:泡沫 растёт от потока (сильный поток = пена быстро)
+    gload 2
+    push 7
+    div              ; flow/7
+    gload 13
+    add
+    gstore 13
+    gload 13
+    push 3
+    ge
+    jnz foam_grow
+    jmp foam_settle
+foam_grow:
+    push 0
+    gstore 13
+    gload 1
     push 1
     add
-    gstore 16
-phys_done:
-    msec
     push 100
+    min
+    gstore 1
+    jmp foam_settle
+foam_settle:
+    ; пена ОСЕДАЕТ сама когда НЕ льём
+    gload 2
+    push 0
+    eq
+    jnz foam_down
+    jmp spill_chk
+foam_down:
+    gload 1
+    push 0
+    gt
+    jnz foam_dec
+    jmp spill_chk
+foam_dec:
+    gload 1
+    push 1
+    sub
+    gstore 1
+    jmp spill_chk
+
+spill_chk:
+    ; ПЕРЕЛИВ: fill+foam > 100 -> SPILL
+    gload 0
+    gload 1
+    add
+    push 100
+    gt
+    jnz do_spill
+    jmp blink_tick
+
+do_spill:
+    push 3
+    gstore 5
+    push 0
+    gstore 2
+    beep 150 300
+    beep 100 300
+    gload 7
+    push 0
+    gstore 7
+    gload 3
+    push 1
+    sub
+    gstore 3
+    jmp blink_tick
+
+; ---- моргание idle-медведя ----
+blink_tick:
+    gload 5
+    jnz blink_skip
+    msec
+    push 2500
     mod
+    push 2200
+    ge
+    jnz blink_on
+    push 0
+    gstore 10
+    jmp blink_skip
+blink_on:
+    push 1
+    gstore 10
+blink_skip:
+    jmp draw
+grade_serve:
+    ; нельзя подать с большой пеной? Пена входит в оценку: eff = fill + foam/3
+    ; |fill + foam/3 - target| :
+    gload 0
+    gload 1
+    push 3
+    div
+    add
+    gload 6
+    sub
+    ; abs
+    dup
+    push 0
+    lt
+    jnz gs_neg
+    jmp gs_pos
+gs_neg:
+    push -1
+    mul
+gs_pos:
+    gstore 11        ; diff
+
+    ; diff <= 5 -> PERFECT
+    gload 11
+    push 5
+    le
+    jnz gs_perfect
+    ; diff <= 15 -> GOOD
+    gload 11
+    push 15
+    le
+    jnz gs_good
+    ; diff <= 30 -> MEH
+    gload 11
+    push 30
+    le
+    jnz gs_meh
+    jmp gs_rage
+
+gs_perfect:
+    push 2
+    gstore 5
+    push 4
     gstore 9
+    gload 3
+    push 3
+    add
+    gstore 3
+    gload 7
+    push 1
+    add
+    gstore 7
+    beep 1600 80
+    beep 1900 120
+    jmp gs_show
+gs_good:
+    push 2
+    gstore 5
+    push 3
+    gstore 9
+    gload 3
+    push 1
+    add
+    gstore 3
+    gload 7
+    push 1
+    add
+    gstore 7
+    beep 1200 80
+    jmp gs_show
+gs_meh:
+    push 2
+    gstore 5
+    push 5
+    gstore 9
+    gload 7
+    push 0
+    gstore 7
+    beep 600 150
+    jmp gs_show
+gs_rage:
+    push 2
+    gstore 5
+    push 6
+    gstore 9
+    push 0
+    gstore 7
+    gload 3
+    push 1
+    sub
+    gstore 3
+    beep 200 200
+    beep 150 250
+gs_show:
+    ; рекорд
+    gload 3
+    gload 4
+    gt
+    jnz gs_best
+    ret
+gs_best:
+    gload 3
+    save K1
+    gload 3
+    gstore 4
+    ret
+
+; ================= новый заказ =================
+new_order:
+    push 0
+    gstore 5
+    push 0
+    gstore 2
+    push 0
+    gstore 0
+    push 0
+    gstore 1
+    push 0
+    gstore 9        ; idle медведь
+    push 0
+    gstore 10
+    push 1
+    gstore 11
+    ; цель 30..85
+    push 56
+    rand
+    push 30
+    add
+    gstore 6
+    ret
 
 ; ================= draw =================
 draw:
     cls
 
-    ; ---- шапка ----
-    text 0 0 1 S1
-    push 88
-    push 12
+    ; ---- медведь слева (по состоянию) ----
+    gload 5
+    push 2
+    eq
+    jnz dr_grade_bear
+    gload 5
+    push 3
+    eq
+    jnz dr_rage_bear
+    ; order/pour: idle или blink
+    gload 10
+    jnz dr_blink
+    call draw_bear_idle
+    jmp dr_bear_done
+dr_blink:
+    call draw_bear_blink
+    jmp dr_bear_done
+dr_grade_bear:
+    gload 9
+    push 4
+    eq
+    jnz dr_perfect_b
+    gload 9
+    push 3
+    eq
+    jnz dr_good_b
+    gload 9
+    push 5
+    eq
+    jnz dr_meh_b
+    jmp dr_rage_bear
+dr_perfect_b:
+    call draw_bear_perfect
+    jmp dr_bear_done
+dr_good_b:
+    call draw_bear_good
+    jmp dr_bear_done
+dr_meh_b:
+    call draw_bear_meh
+    jmp dr_bear_done
+dr_rage_bear:
+    call draw_bear_rage
+dr_bear_done:
+
+    ; ---- кружка (x=98..124, y=4..42) ----
+    call draw_glass
+
+    ; ---- ПИВО: заливка внутри кружки ----
+    ; внутренняя зона: x=101..121, y=6..40. Полная высота пива: 34px при fill=100
+    gload 0
+    push 0
+    gt
+    jnz beer_draw
+    jmp foam_draw
+beer_draw:
+    ; h = fill * 34 / 100
+    gload 0
+    push 34
+    mul
+    push 100
+    div
+    gstore 11
+    gload 11
+    push 1
+    max
+    gstore 11
+    ; y = 40 - h
+    push 40
+    gload 11
+    sub
+    gstore 12
+    ; ЗАЛИВКА С ГОРИЗОНТАЛЬНЫМИ ПУЗЫРЯМИ (тёмные линии-«волны»):
+    push 101
+    gload 12
+    push 21
+    gload 11
+    push 1
+    frect
+    ; волны: каждые 6px тёмная линия 1px (эффект пива)
+    gload 12
+    push 5
+    add
+    gstore 11
+beer_waves:
+    gload 11
+    push 39
+    lt
+    jnz beer_wave_do
+    jmp foam_draw
+beer_wave_do:
+    push 101
+    gload 11
+    push 21
+    push 1
+    push 0
+    frect
+    gload 11
+    push 6
+    add
+    gstore 11
+    jmp beer_waves
+
+    ; ---- ПЕНА: белая шапка над пивом (мигает-колышется) ----
+foam_draw:
+    gload 1
+    push 0
+    gt
+    jnz foam_do
+    jmp target_line
+foam_do:
+    ; foam пикс: fh = foam*10/100 (макс 10)
+    gload 1
+    push 10
+    mul
+    push 100
+    div
+    gstore 11
+    ; верх пива = ybeer_top
+    gload 0
+    push 34
+    mul
+    push 100
+    div
+    push 40
+    sub
+    push 6
+    max
+    gstore 12
+    ; пена: белые «пузыри» — блобы над пивом с jitter
+    msec
+    push 300
+    div
+    push 2
+    mod
+    gstore 11
+    push 101
+    gload 12
+    gload 11
+    sub
+    push 3
+    push 2
+    push 1
+    frect
+    push 106
+    gload 12
+    gload 11
+    sub
+    push 1
+    push 4
+    push 1
+    frect
+    push 110
+    gload 12
+    gload 11
+    sub
+    push 2
+    push 3
+    push 1
+    frect
+    push 115
+    gload 12
+    gload 11
+    sub
+    push 2
+    push 2
+    push 1
+    frect
+    push 119
+    gload 12
+    gload 11
+    sub
+    push 4
+    push 2
+    push 1
+    frect
+
+    ; ---- ЦЕЛЕВАЯ ЛИНИЯ (тире) ----
+target_line:
+    gload 5
+    push 1
+    eq
+    jnz tl_draw
+    jmp score_draw
+tl_draw:
+    ; y = 40 - target*34/100
+    gload 6
+    push 34
+    mul
+    push 100
+    div
+    push 40
+    sub
+    push 6
+    max
+    gstore 12
+    push 98
+    gload 12
+    push 27
+    push 1
+    push 0
+    frect
+
+    ; ---- СТРУЯ (поток) ----
+    gload 2
+    push 0
+    gt
+    jnz jet_draw
+    jmp score_draw
+jet_draw:
+    ; струя от кувшина (y=0) до пива: x центр = 111, ширина = flow/25
+    ; колебание: wob = msec/40 % 2
+    msec
+    push 40
+    div
+    push 2
+    mod
+    gstore 11
+    gload 2
+    push 25
+    div
+    push 1
+    max
+    gstore 12
+    ; y низа струи = верх пива (ybeer)
+    gload 0
+    push 34
+    mul
+    push 100
+    div
+    push 40
+    sub
+    push 6
+    max
+    gstore 13
+    push 111
+    gload 11
+    add
+    push 0
+    gload 12
+    gload 13
+    push 1
+    frect
+
+    ; ---- счёт ----
+score_draw:
+    text 2 0 1 S9
+    push 14
+    push 0
+    push 1
+    gload 3
+    num
+    text 76 0 1 SA
+    push 104
+    push 0
     push 1
     gload 4
     num
 
-    ; ---- клиент (слева, большое окно 4..52 x 18..62) ----
-    call draw_customer
-
-    ; ---- заказ ----
-    text 4 14 1 S2
-    push 46
-    push 14
+    ; ---- подписи по состоянию ----
+    gload 5
+    jz st_order
     push 1
-    gload 7
-    num
-    text 4 24 1 S3
-    push 40
-    push 24
-    push 1
-    gload 0
-    num
-
-    ; ---- кружка (справа) ----
-    push 78
-    push 40
-    push 22
-    push 18
-    push 1
-    rect
-    ; ручка
-    push 100
-    push 43
-    push 3
-    push 8
-    push 1
-    rect
-    ; beer-уровень: h = fill*14/100
-    gload 0
-    push 14
-    mul
-    push 100
-    div
-    gstore 12
-    ; beer-блок: y = 55-h .. 55
-    gload 12
-    jz beer_none
-    push 55
-    gload 12
+    gload 5
     sub
-    gstore 13
-    ; рисуем колонками: x 80..98, y g13..55
-    push 80
-    gstore 14
-beer_x:
-    gload 14
-    push 98
-    le
-    jnz beer_y
-    jmp beer_done
-beer_y:
-    gload 13
-    gstore 15
-beer_y_l:
-    gload 15
-    push 55
-    le
-    jnz beer_p
-    gload 14
-    push 1
-    add
-    gstore 14
-    jmp beer_x
-beer_p:
-    gload 14
-    gload 15
-    push 1
-    px
-    gload 15
-    push 1
-    add
-    gstore 15
-    jmp beer_y_l
-beer_none:
-beer_done:
-    ; пена сверху пива
-    gload 1
-    jz foam_none
-    ; y = 54 - 2
-    push 52
-    push 52
-    sub
-    ; нет: пена y = (55 - h - 3) .. просто 2 ряда
-    gload 1
-    push 4
-    div
-    gstore 15
-foam_row:
-    gload 15
-    jz foam_none
-    push 80
-    gstore 14
-foam_x:
-    gload 14
-    push 98
-    le
-    jnz foam_p
-    gload 15
-    push 1
-    sub
-    gstore 15
-    jmp foam_row
-foam_p:
-    msec
-    push 3
-    add
-    gload 14
-    push 3
-    mul
-    add
-    push 6
-    mod
-    jz foam_hole
-    gload 14
-    push 51
-    gload 15
-    sub
-    push 1
-    px
-    jmp foam_next
-foam_hole:
-foam_next:
-    gload 14
-    push 1
-    add
-    gstore 14
-    jmp foam_x
-foam_none:
-
-    ; ---- кувшин (над кружкой, высота g3, наклон g2) ----
-    ; кувшин: x = 82 + tilt*4, y = 22 - lvl*4
-    push 82
-    gload 2
-    push 4
-    mul
-    add
-    gstore 17
-    push 22
-    gload 3
-    push 4
-    mul
-    sub
-    gstore 16
-    ; корпус кувшина 10x8
-    gload 17
-    gload 16
-    push 10
-    push 8
-    push 1
-    rect
-    ; ручка кувшина (правая стенка)
-    gload 17
-    push 10
-    add
-    gload 16
+    jz st_pour
     push 2
-    add
-    push 3
-    push 4
-    push 1
-    rect
-    ; stream (только при наливе)
-    gload 6
-    push 1
-    eq
-    jnz stream_on
-    jmp mug_back
-stream_on:
-    ; струя: от (g17+5, g16+8) вниз к пене, с изгибом по tilt
-    gload 17
-    push 5
-    add
-    gstore 14
-    gload 16
-    push 8
-    add
-    gstore 15
-    ; 3 сегмента струи
-    push 0
-    gstore 12
-stream_seg:
-    gload 12
-    push 3
-    lt
-    jnz stream_p
-    jmp stream_done
-stream_p:
-    gload 14
-    gload 15
-    push 1
-    px
-    ; x сдвигается по наклону
-    gload 14
-    gload 2
-    push 2
+    gload 5
     sub
-    add
-    gstore 14
-    gload 15
-    push 4
-    add
-    gstore 15
-    gload 12
-    push 1
-    add
-    gstore 12
-    jmp stream_seg
-stream_done:
-    ; брызги при tilt==3
-    gload 2
-    push 3
-    eq
-    jnz spill_px
-    jmp mug_back
-spill_px:
-    msec
-    push 250
-    mod
+    jz st_grade
+    jmp st_spill
+
+st_order:
+    text 40 43 1 S2
+    ; target число справа от линии
     push 2
-    mul
-    push 88
-    add
-    gstore 12
-    gload 12
-    push 49
-    push 1
-    px
-    gload 12
-    push 4
-    add
-    push 50
-    push 1
-    px
-mug_back:
-
-    ; ---- состояние-подсказки ----
-    gload 6
-    jz hint_order
-    gload 6
-    push 1
-    eq
-    jnz hint_pour
-    jmp grade_show
-hint_order:
-    text 4 55 1 S9
-    jmp hud_end
-hint_pour:
-    text 4 55 1 S9
-    jmp hud_end
-
-grade_show:
-    ; ---- экран оценки ----
-    push 14
     push 12
-    push 100
-    push 40
     push 1
-    rect
-    text 24 16 1 S1
-    gload 18
-    jz gr_good
-    ; PERFECT
-    text 40 30 1 S4
-    gload 8
+    gload 6
+    num
+    jmp dd
+st_pour:
+    ; процент стика: flow
+    push 2
+    push 43
+    push 1
+    gload 2
+    num
+    ; streak >= 2: STREAK x N
+    gload 7
     push 2
     ge
     jnz streak_show
-    jmp gr_sc
+    jmp dd
 streak_show:
-    text 34 42 1 SB
-    push 70
-    push 42
-    push 1
-    gload 8
-    num
-    jmp gr_sc
+    text 40 43 1 S4
+    jmp dd
+st_grade:
+    ; оценка по client
+    gload 9
+    push 4
+    eq
+    jnz gr_perf
+    gload 9
+    push 3
+    eq
+    jnz gr_good
+    gload 9
+    push 5
+    eq
+    jnz gr_meh
+    jmp gr_rage
+gr_perf:
+    text 40 43 1 S4
+    jmp dd
 gr_good:
-    gload 19
-    jz gr_bad
-    text 40 30 1 S5
-    jmp gr_sc
-gr_bad:
-    text 40 30 1 S6
-gr_sc:
-    text 24 46 1 S7
+    text 40 43 1 S5
+    jmp dd
+gr_meh:
+    text 40 43 1 S6
+    jmp dd
+gr_rage:
+    text 40 43 1 S7
+    jmp dd
+st_spill:
+    text 40 43 1 S8
+dd:
+    disp
+    jmp main
+
+; ================= СПРАЙТЫ (из RootBear.pdx) =================
+
+draw_bear_idle:
+    push 0
+    push 1
+    push 58
+    push 6
+    push 1
+    frect
+    push 0
+    push 7
+    push 57
+    push 1
+    push 1
+    frect
+    push 0
+    push 8
+    push 55
+    push 1
+    push 1
+    frect
+    push 0
+    push 9
+    push 54
+    push 2
+    push 1
+    frect
+    push 0
+    push 11
+    push 55
+    push 2
+    push 1
+    frect
+    push 0
+    push 13
+    push 56
+    push 7
+    push 1
+    frect
+    push 0
+    push 20
+    push 55
+    push 3
+    push 1
+    frect
+    push 0
+    push 23
+    push 56
+    push 1
+    push 1
+    frect
+    push 0
+    push 24
+    push 57
+    push 1
+    push 1
+    frect
+    push 0
+    push 25
+    push 58
+    push 5
+    push 1
+    frect
+    push 0
+    push 30
+    push 57
+    push 1
+    push 1
+    frect
+    push 2
+    push 31
+    push 54
+    push 1
+    push 1
+    frect
+    push 2
+    push 32
+    push 53
+    push 1
+    push 1
+    frect
+    push 0
+    push 33
+    push 55
+    push 1
+    push 1
+    frect
+    push 0
+    push 34
+    push 56
+    push 1
+    push 1
+    frect
+    push 0
+    push 35
+    push 57
+    push 1
+    push 1
+    frect
+    push 0
+    push 36
+    push 58
+    push 11
+    push 1
+    frect
+    ret
+
+draw_bear_blink:
+    push 0
+    push 1
+    push 58
+    push 6
+    push 1
+    frect
+    push 0
+    push 7
+    push 57
+    push 1
+    push 1
+    frect
+    push 0
+    push 8
+    push 55
+    push 1
+    push 1
+    frect
+    push 0
+    push 9
+    push 54
+    push 2
+    push 1
+    frect
+    push 0
+    push 11
+    push 55
+    push 2
+    push 1
+    frect
+    push 0
+    push 13
+    push 56
+    push 7
+    push 1
+    frect
+    push 0
+    push 20
+    push 55
+    push 3
+    push 1
+    frect
+    push 0
+    push 23
+    push 56
+    push 1
+    push 1
+    frect
+    push 0
+    push 24
+    push 57
+    push 1
+    push 1
+    frect
+    push 0
+    push 25
+    push 58
+    push 5
+    push 1
+    frect
+    push 0
+    push 30
+    push 57
+    push 1
+    push 1
+    frect
+    push 2
+    push 31
+    push 54
+    push 1
+    push 1
+    frect
+    push 2
+    push 32
+    push 53
+    push 1
+    push 1
+    frect
+    push 0
+    push 33
+    push 55
+    push 1
+    push 1
+    frect
+    push 0
+    push 34
+    push 56
+    push 1
+    push 1
+    frect
+    push 0
+    push 35
+    push 57
+    push 1
+    push 1
+    frect
+    push 0
+    push 36
+    push 58
+    push 11
+    push 1
+    frect
+    ret
+
+draw_bear_good:
+    push 24
+    push 1
+    push 23
+    push 2
+    push 1
+    frect
+    push 0
+    push 3
+    push 3
+    push 1
+    push 1
+    frect
+    push 18
+    push 3
+    push 29
+    push 1
+    push 1
+    frect
+    push 54
+    push 3
+    push 1
+    push 1
+    push 1
+    frect
+    push 0
+    push 4
+    push 5
+    push 1
+    push 1
+    frect
+    push 14
+    push 4
+    push 32
+    push 1
+    push 1
+    frect
+    push 51
+    push 4
+    push 4
+    push 1
+    push 1
+    frect
+    push 0
+    push 5
+    push 6
+    push 2
+    push 1
+    frect
+    push 11
+    push 5
+    push 34
+    push 1
+    push 1
+    frect
+    push 48
+    push 5
+    push 7
+    push 1
+    push 1
+    frect
+    push 8
+    push 6
+    push 36
+    push 1
+    push 1
+    frect
+    push 50
+    push 6
+    push 5
+    push 1
+    push 1
+    frect
+    push 0
+    push 7
     push 44
+    push 1
+    push 1
+    frect
+    push 50
+    push 7
+    push 6
+    push 1
+    push 1
+    frect
+    push 0
+    push 8
+    push 45
+    push 1
+    push 1
+    frect
+    push 50
+    push 8
+    push 2
+    push 1
+    push 1
+    frect
+    push 0
+    push 9
     push 46
     push 1
-    gload 4
-    num
-
-hud_end:
-    ; hold=exit снизу
-    text 61 55 1 SA
-    disp
-    jmp main_loop
-
-; ================= subroutines =================
-new_order:
-    push 0
-    gstore 0
-    push 0
-    gstore 1
-    push 0
-    gstore 2
     push 1
-    gstore 3
+    frect
     push 0
-    gstore 6
+    push 10
+    push 47
+    push 1
+    push 1
+    frect
     push 0
-    gstore 16
-    ; цель 30..80
+    push 11
+    push 49
+    push 1
+    push 1
+    frect
+    push 0
+    push 12
     push 51
-    rand
-    push 30
-    add
-    gstore 7
-    ; клиент 0..3
-    push 4
-    rand
-    gstore 10
-    ; rounds++
-    gload 11
     push 1
-    add
-    gstore 11
-    ret
-
-grade:
-    ; diff = fill - target
-    gload 0
-    gload 7
-    sub
-    ; |diff|
-    dup
-    push 0
-    lt
-    jnz neg_d
-    jmp abs_d
-neg_d:
-    push -1
-    mul
-abs_d:
-    ; diff на стеке
-    push 5
-    le
-    jnz g_perf
-    ; not perfect: снова посчитать |diff| (уже снято) — пересчитываем
-    gload 0
-    gload 7
-    sub
-    dup
-    push 0
-    lt
-    jnz neg_d2
-    jmp abs_d2
-neg_d2:
-    push -1
-    mul
-abs_d2:
-    push 15
-    le
-    jnz g_good
-    ; BAD
-    push 0
-    gstore 8
-    push 0
-    gstore 18
-    push 0
-    gstore 19
-    push 2
-    gstore 6
-    beep 220 300
-    ret
-g_perf:
-    push 3
-    gstore 18
-    push 0
-    gstore 19
-    gload 4
-    push 3
-    add
-    gstore 4
-    gload 8
     push 1
-    add
-    gstore 8
-    gload 4
-    gload 5
-    gt
-    jz g_pnb
-    gload 4
-    gstore 5
-    gload 5
-    save K1
-g_pnb:
-    push 2
-    gstore 6
-    beep 1600 120
-    ret
-g_good:
+    frect
     push 0
-    gstore 18
-    push 1
-    gstore 19
-    gload 4
-    push 1
-    add
-    gstore 4
-    push 2
-    gstore 6
-    beep 1100 100
-    ret
-
-; ---- клиенты: g10: 0 медвежонок, 1 зайчик, 2 котик, 3 утка ----
-draw_customer:
-    ; голова: круг
-    gload 10
-    jnz c_not_bear
-    ; МЕДВЕЖОНОК: голова+уши+морда
-    push 20
-    push 34
-    push 9
-    push 1
-    fcirc
     push 13
-    push 26
-    push 3
-    push 1
-    fcirc
-    push 27
-    push 26
-    push 3
-    push 1
-    fcirc
-    push 17
-    push 32
-    push 1
-    push 1
-    fcirc
-    push 23
-    push 32
-    push 1
-    push 1
-    fcirc
-    push 20
-    push 37
-    push 3
-    push 1
-    fcirc
-    ; тельце
-    push 20
     push 52
-    push 8
+    push 1
+    push 1
+    frect
+    push 0
+    push 14
+    push 53
+    push 1
+    push 1
+    frect
+    push 0
+    push 15
+    push 54
+    push 2
+    push 1
+    frect
+    push 0
+    push 17
+    push 55
+    push 3
+    push 1
+    frect
+    push 0
+    push 20
+    push 56
+    push 15
+    push 1
+    frect
+    push 0
+    push 35
+    push 57
+    push 2
+    push 1
+    frect
+    push 0
+    push 37
+    push 58
     push 10
     push 1
-    ell
+    frect
     ret
-c_not_bear:
-    gload 10
-    push 1
-    eq
-    jnz c_bunny
-    gload 10
-    push 2
-    eq
-    jnz c_cat
-    jmp c_duck
-c_bunny:
-    ; ЗАЙКА: длинные уши
-    push 20
-    push 32
+
+draw_bear_perfect:
     push 8
     push 1
-    fcirc
-    push 15
-    push 22
-    push 2
-    push 8
-    push 1
-    ell
-    push 25
-    push 22
-    push 2
-    push 8
-    push 1
-    ell
-    push 17
-    push 30
+    push 4
     push 1
     push 1
-    fcirc
-    push 23
-    push 30
-    push 1
-    push 1
-    fcirc
-    push 20
-    push 38
-    push 2
-    push 1
-    fcirc
-    push 20
-    push 52
-    push 8
-    push 9
-    push 1
-    ell
-    ret
-c_cat:
-    ; КОТИК: треугольные уши
-    push 20
-    push 32
-    push 8
-    push 1
-    fcirc
-    ; уши-треугольники (пикселями)
+    frect
     push 14
-    push 28
     push 1
-    px
+    push 3
+    push 1
+    push 1
+    frect
+    push 7
+    push 2
+    push 7
+    push 1
+    push 1
+    frect
     push 15
-    push 27
-    push 1
-    px
-    push 16
-    push 26
-    push 1
-    px
-    push 17
-    push 26
-    push 1
-    px
-    push 18
-    push 27
-    push 1
-    px
-    push 19
-    push 28
-    push 1
-    px
-    push 22
-    push 28
-    push 1
-    px
-    push 23
-    push 27
-    push 1
-    px
-    push 24
-    push 26
-    push 1
-    px
-    push 25
-    push 26
-    push 1
-    px
-    push 26
-    push 27
-    push 1
-    px
-    push 27
-    push 28
-    push 1
-    px
-    push 17
-    push 30
-    push 1
-    push 1
-    fcirc
-    push 23
-    push 30
-    push 1
-    push 1
-    fcirc
-    push 20
-    push 36
+    push 2
     push 2
     push 1
-    fcirc
-    ; усы
-    push 14
-    push 34
-    push 16
-    push 34
     push 1
-    line
-    push 24
-    push 34
-    push 26
-    push 34
+    frect
+    push 44
+    push 2
+    push 3
+    push 2
     push 1
-    line
-    push 20
-    push 52
-    push 8
-    push 9
-    push 1
-    ell
-    ret
-c_duck:
-    ; УТКА: клюв
-    push 20
-    push 32
+    frect
+    push 5
+    push 3
     push 8
     push 1
-    fcirc
-    push 17
-    push 30
     push 1
-    push 1
-    fcirc
-    push 23
-    push 30
-    push 1
-    push 1
-    fcirc
-    ; клюв
-    push 26
+    frect
     push 35
     push 3
     push 2
     push 1
-    ell
-    push 20
-    push 52
+    push 1
+    frect
+    push 49
+    push 3
+    push 4
+    push 1
+    push 1
+    frect
     push 8
+    push 4
+    push 4
+    push 1
+    push 1
+    frect
+    push 17
+    push 4
+    push 6
+    push 1
+    push 1
+    frect
+    push 34
+    push 4
+    push 4
+    push 2
+    push 1
+    frect
+    push 43
+    push 4
+    push 4
+    push 1
+    push 1
+    frect
+    push 48
+    push 4
+    push 5
+    push 1
+    push 1
+    frect
+    push 8
+    push 5
+    push 3
+    push 1
+    push 1
+    frect
+    push 15
+    push 5
     push 10
     push 1
-    ell
+    push 1
+    frect
+    push 43
+    push 5
+    push 10
+    push 1
+    push 1
+    frect
+    push 9
+    push 6
+    push 2
+    push 1
+    push 1
+    frect
+    push 14
+    push 6
+    push 12
+    push 1
+    push 1
+    frect
+    push 32
+    push 6
+    push 8
+    push 1
+    push 1
+    frect
+    push 43
+    push 6
+    push 8
+    push 1
+    push 1
+    frect
+    push 14
+    push 7
+    push 11
+    push 1
+    push 1
+    frect
+    push 32
+    push 7
+    push 6
+    push 1
+    push 1
+    frect
+    push 40
+    push 7
+    push 2
+    push 1
+    push 1
+    frect
+    push 43
+    push 7
+    push 7
+    push 1
+    push 1
+    frect
+    push 51
+    push 7
+    push 5
+    push 1
+    push 1
+    frect
+    push 10
+    push 8
+    push 16
+    push 1
+    push 1
+    frect
+    push 34
+    push 8
+    push 3
+    push 1
+    push 1
+    frect
+    push 39
+    push 8
+    push 3
+    push 1
+    push 1
+    frect
+    push 43
+    push 8
+    push 13
+    push 1
+    push 1
+    frect
+    push 8
+    push 9
+    push 19
+    push 1
+    push 1
+    frect
+    push 34
+    push 9
+    push 22
+    push 1
+    push 1
+    frect
+    push 4
+    push 10
+    push 24
+    push 1
+    push 1
+    frect
+    push 34
+    push 10
+    push 2
+    push 2
+    push 1
+    frect
+    push 37
+    push 10
+    push 5
+    push 1
+    push 1
+    frect
+    push 43
+    push 10
+    push 13
+    push 1
+    push 1
+    frect
+    push 0
+    push 11
+    push 29
+    push 1
+    push 1
+    frect
+    push 38
+    push 11
+    push 4
+    push 1
+    push 1
+    frect
+    push 43
+    push 11
+    push 7
+    push 1
+    push 1
+    frect
+    push 51
+    push 11
+    push 5
+    push 1
+    push 1
+    frect
+    push 0
+    push 12
+    push 31
+    push 1
+    push 1
+    frect
+    push 39
+    push 12
+    push 2
+    push 2
+    push 1
+    frect
+    push 43
+    push 12
+    push 14
+    push 1
+    push 1
+    frect
+    push 0
+    push 13
+    push 34
+    push 1
+    push 1
+    frect
+    push 43
+    push 13
+    push 12
+    push 1
+    push 1
+    frect
+    push 0
+    push 14
+    push 36
+    push 1
+    push 1
+    frect
+    push 42
+    push 14
+    push 11
+    push 1
+    push 1
+    frect
+    push 0
+    push 15
+    push 38
+    push 2
+    push 1
+    frect
+    push 42
+    push 15
+    push 10
+    push 1
+    push 1
+    frect
+    push 42
+    push 16
+    push 9
+    push 1
+    push 1
+    frect
+    push 0
+    push 17
+    push 39
+    push 1
+    push 1
+    frect
+    push 43
+    push 17
+    push 9
+    push 1
+    push 1
+    frect
+    push 0
+    push 18
+    push 40
+    push 2
+    push 1
+    frect
+    push 43
+    push 18
+    push 11
+    push 1
+    push 1
+    frect
+    push 43
+    push 19
+    push 12
+    push 1
+    push 1
+    frect
+    push 0
+    push 20
+    push 41
+    push 2
+    push 1
+    frect
+    push 44
+    push 20
+    push 12
+    push 1
+    push 1
+    frect
+    push 44
+    push 21
+    push 13
+    push 1
+    push 1
+    frect
+    push 0
+    push 22
+    push 42
+    push 5
+    push 1
+    frect
+    push 44
+    push 22
+    push 14
+    push 4
+    push 1
+    frect
+    push 45
+    push 26
+    push 13
+    push 3
+    push 1
+    frect
+    push 0
+    push 27
+    push 43
+    push 1
+    push 1
+    frect
+    push 0
+    push 28
+    push 42
+    push 2
+    push 1
+    frect
+    push 44
+    push 29
+    push 14
+    push 1
+    push 1
+    frect
+    push 0
+    push 30
+    push 58
+    push 7
+    push 1
+    frect
+    push 1
+    push 37
+    push 57
+    push 2
+    push 1
+    frect
+    push 0
+    push 39
+    push 58
+    push 3
+    push 1
+    frect
+    push 0
+    push 42
+    push 56
+    push 1
+    push 1
+    frect
+    push 0
+    push 43
+    push 52
+    push 1
+    push 1
+    frect
+    push 0
+    push 44
+    push 50
+    push 1
+    push 1
+    frect
+    push 0
+    push 45
+    push 48
+    push 1
+    push 1
+    frect
+    push 0
+    push 46
+    push 49
+    push 1
+    push 1
+    frect
+    ret
+
+draw_bear_meh:
+    push 0
+    push 1
+    push 58
+    push 5
+    push 1
+    frect
+    push 0
+    push 6
+    push 56
+    push 1
+    push 1
+    frect
+    push 0
+    push 7
+    push 55
+    push 3
+    push 1
+    frect
+    push 0
+    push 10
+    push 56
+    push 12
+    push 1
+    frect
+    push 0
+    push 22
+    push 57
+    push 2
+    push 1
+    frect
+    push 0
+    push 24
+    push 58
+    push 5
+    push 1
+    frect
+    push 1
+    push 29
+    push 56
+    push 1
+    push 1
+    frect
+    push 3
+    push 30
+    push 53
+    push 1
+    push 1
+    frect
+    push 1
+    push 31
+    push 54
+    push 1
+    push 1
+    frect
+    push 0
+    push 32
+    push 55
+    push 1
+    push 1
+    frect
+    push 0
+    push 33
+    push 56
+    push 1
+    push 1
+    frect
+    push 0
+    push 34
+    push 57
+    push 2
+    push 1
+    frect
+    push 0
+    push 36
+    push 58
+    push 11
+    push 1
+    frect
+    ret
+
+draw_bear_rage:
+    push 14
+    push 1
+    push 25
+    push 1
+    push 1
+    frect
+    push 2
+    push 2
+    push 7
+    push 1
+    push 1
+    frect
+    push 11
+    push 2
+    push 29
+    push 1
+    push 1
+    frect
+    push 44
+    push 2
+    push 14
+    push 1
+    push 1
+    frect
+    push 0
+    push 3
+    push 9
+    push 1
+    push 1
+    frect
+    push 10
+    push 3
+    push 43
+    push 1
+    push 1
+    frect
+    push 0
+    push 4
+    push 58
+    push 1
+    push 1
+    frect
+    push 0
+    push 5
+    push 56
+    push 1
+    push 1
+    frect
+    push 0
+    push 6
+    push 58
+    push 1
+    push 1
+    frect
+    push 0
+    push 7
+    push 44
+    push 1
+    push 1
+    frect
+    push 45
+    push 7
+    push 7
+    push 1
+    push 1
+    frect
+    push 0
+    push 8
+    push 46
+    push 1
+    push 1
+    frect
+    push 48
+    push 8
+    push 8
+    push 1
+    push 1
+    frect
+    push 3
+    push 9
+    push 41
+    push 2
+    push 1
+    frect
+    push 45
+    push 9
+    push 3
+    push 1
+    push 1
+    frect
+    push 53
+    push 9
+    push 5
+    push 1
+    push 1
+    frect
+    push 57
+    push 10
+    push 1
+    push 1
+    push 1
+    frect
+    push 4
+    push 11
+    push 41
+    push 1
+    push 1
+    frect
+    push 1
+    push 12
+    push 44
+    push 1
+    push 1
+    frect
+    push 0
+    push 13
+    push 45
+    push 4
+    push 1
+    frect
+    push 0
+    push 17
+    push 46
+    push 1
+    push 1
+    frect
+    push 1
+    push 18
+    push 45
+    push 1
+    push 1
+    frect
+    push 0
+    push 19
+    push 46
+    push 1
+    push 1
+    frect
+    push 0
+    push 20
+    push 2
+    push 1
+    push 1
+    frect
+    push 3
+    push 20
+    push 43
+    push 3
+    push 1
+    frect
+    push 0
+    push 21
+    push 1
+    push 1
+    push 1
+    frect
+    push 4
+    push 23
+    push 42
+    push 5
+    push 1
+    frect
+    push 5
+    push 28
+    push 41
+    push 4
+    push 1
+    frect
+    push 6
+    push 32
+    push 40
+    push 6
+    push 1
+    frect
+    push 6
+    push 38
+    push 39
+    push 4
+    push 1
+    frect
+    push 6
+    push 42
+    push 40
+    push 1
+    push 1
+    frect
+    push 6
+    push 43
+    push 41
+    push 4
+    push 1
+    frect
+    ret
+
+draw_glass:
+    push 106
+    push 4
+    push 11
+    push 1
+    push 1
+    frect
+    push 102
+    push 5
+    push 19
+    push 1
+    push 1
+    frect
+    push 100
+    push 6
+    push 5
+    push 1
+    push 1
+    frect
+    push 118
+    push 6
+    push 5
+    push 1
+    push 1
+    frect
+    push 100
+    push 7
+    push 6
+    push 1
+    push 1
+    frect
+    push 117
+    push 7
+    push 6
+    push 1
+    push 1
+    frect
+    push 100
+    push 8
+    push 2
+    push 3
+    push 1
+    frect
+    push 105
+    push 8
+    push 13
+    push 1
+    push 1
+    frect
+    push 121
+    push 8
+    push 2
+    push 3
+    push 1
+    frect
+    push 99
+    push 11
+    push 3
+    push 1
+    push 1
+    frect
+    push 121
+    push 11
+    push 3
+    push 1
+    push 1
+    frect
+    push 99
+    push 12
+    push 2
+    push 7
+    push 1
+    frect
+    push 122
+    push 12
+    push 2
+    push 7
+    push 1
+    frect
+    push 99
+    push 19
+    push 3
+    push 1
+    push 1
+    frect
+    push 121
+    push 19
+    push 3
+    push 1
+    push 1
+    frect
+    push 100
+    push 20
+    push 2
+    push 1
+    push 1
+    frect
+    push 121
+    push 20
+    push 2
+    push 1
+    push 1
+    frect
+    push 100
+    push 21
+    push 3
+    push 1
+    push 1
+    frect
+    push 120
+    push 21
+    push 3
+    push 1
+    push 1
+    frect
+    push 101
+    push 22
+    push 2
+    push 3
+    push 1
+    frect
+    push 120
+    push 22
+    push 2
+    push 3
+    push 1
+    frect
+    push 102
+    push 25
+    push 2
+    push 7
+    push 1
+    frect
+    push 120
+    push 25
+    push 1
+    push 2
+    push 1
+    frect
+    push 119
+    push 27
+    push 2
+    push 6
+    push 1
+    frect
+    push 103
+    push 32
+    push 2
+    push 8
+    push 1
+    frect
+    push 118
+    push 33
+    push 2
+    push 7
+    push 1
+    frect
+    push 103
+    push 40
+    push 6
+    push 1
+    push 1
+    frect
+    push 115
+    push 40
+    push 5
+    push 1
+    push 1
+    frect
+    push 104
+    push 41
+    push 15
+    push 1
+    push 1
+    frect
     ret
