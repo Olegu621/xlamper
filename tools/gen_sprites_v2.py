@@ -12,7 +12,7 @@ OUT = Path(r"C:\Users\admin\flipper\dumps\spr_v2.xlas")
 # (тип, pdi-префикс glasses/NN_, целевой размер, широкая?)
 GLASSES = [
     ("G0", "glasses/01_def_outline.pdi", 27, 40),  # тумблер
-    ("G1", "glasses/02_hb_outline.pdi", 18, 41),   # хайбол (узкий высокий)
+    ("G1", "glasses/02_hb_outline.pdi", 18, 41),  # хайбол (узкий высокий)
     ("G2", "glasses/03_whiskey_outline.pdi", 42, 36),  # шот/виски (низкий широкий)
     ("G3", "glasses/04_pitcher_outline.pdi", 29, 41),  # питчер (большой)
 ]
@@ -32,7 +32,14 @@ def conv(pdi: str, name: str, tw: int, th: int) -> tuple[list[str], list[list[in
     merged = pdi2xla.rows_to_frects(sub, tw, th)
     lines = [f"{name}:"]
     for x, y, wd, ht in merged:
-        lines += [f"    push {x}", f"    push {y}", f"    push {wd}", f"    push {ht}", "    push 1", "    frect"]
+        lines += [
+            f"    push {x}",
+            f"    push {y}",
+            f"    push {wd}",
+            f"    push {ht}",
+            "    push 1",
+            "    frect",
+        ]
     lines.append("    ret")
     bmp = [[1 if sub(x, y) else 0 for x in range(tw)] for y in range(th)]
     return lines, bmp
@@ -139,7 +146,14 @@ def main() -> None:
         merged = pdi2xla.rows_to_frects(line_art, tw, th)
         out.append(f"{name}:")
         for x, y, wd, ht in merged:
-            out += [f"    push {x + ox}", f"    push {y + 2}", f"    push {wd}", f"    push {ht}", "    push 1", "    frect"]
+            out += [
+                f"    push {x + ox}",
+                f"    push {y + 2}",
+                f"    push {wd}",
+                f"    push {ht}",
+                "    push 1",
+                "    frect",
+            ]
         out.append("    ret")
 
     dbg = Path(r"C:\Users\admin\flipper\dumps\glass_debug.txt")
