@@ -1,4 +1,1 @@
 rootbear|ROOTBEAR|games
-snake|SNAKE|games
-pong|PONG|games
-pour|POUR|games
