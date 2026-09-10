@@ -97,15 +97,18 @@ OP = {
     "stick": 0x82,
     "event": 0x83,
     "hold": 0x84,
+    "httpget": 0x78,  # strIdx imm16: URL из строк -> GET -> len|-1 на стек
+    "httpch": 0x79,  # idx со стека: char ответа на стек
+    "wget": 0x7B,  # dst cnt со стека: HTTP-ответ -> data-секция (int16), возвращает кол-во слов
     "sin": 0x90,
     "cos": 0x91,
     "sqrt": 0x92,
 }
 
 # мнемоники, требующие imm16-операнд (кроме push/pushstr — особые)
-IMM16 = {"gstore", "gload"}
+IMM16 = {"gstore", "gload", "httpget"}
 # мнемоники со строковым операндом (строковый индекс)
-STROPS = {"text", "save", "load"}
+STROPS = {"text", "save", "load", "httpget"}
 
 
 class AsmError(Exception):
