@@ -9,6 +9,7 @@
  4. Дизассемблер snake.xla покрывает ВЕСЬ code-сегмент непрерывно
     (pc следующей инструкции == len(code) в конце).
 """
+
 import sys
 from pathlib import Path
 
@@ -73,7 +74,10 @@ start:
     blob1 = xlas.assemble(src)
     code1, data, pool, blob, title = xla_disasm.load_bytes(blob1)
     listing = xla_disasm.disasm(code1, pool)
-    check("roundtrip: без неизвестных опкодов", all("НЕИЗВЕСТНЫЙ" not in ln for ln in listing))
+    check(
+        "roundtrip: без неизвестных опкодов",
+        all("НЕИЗВЕСТНЫЙ" not in ln for ln in listing),
+    )
     check("roundtrip: титул TEST", title == "TEST", title)
 
     # ЧЕСТНЫЙ roundtrip: парсим исходник дважды и сверяем код-секции —
@@ -81,13 +85,19 @@ start:
     # на полное покрытие кода без потерь (последний pc + размер == len).
     prog = xlas.parse(src)
     code_again = xlas.encode(prog)
-    check("roundtrip: код детерминирован", code_again == code1,
-          f"{len(code_again)} vs {len(code1)}")
+    check(
+        "roundtrip: код детерминирован",
+        code_again == code1,
+        f"{len(code_again)} vs {len(code1)}",
+    )
     last_pc = int(listing[-1].split(":")[0].replace("pc=", ""))
     # размер последней инструкции: она стековая (1 байт) — но возьмём
     # из листинга честно: перечитаем pc следующей за концом
-    check("roundtrip: листинг покрывает весь код", last_pc <= len(code1),
-          f"last_pc={last_pc} code={len(code1)}")
+    check(
+        "roundtrip: листинг покрывает весь код",
+        last_pc <= len(code1),
+        f"last_pc={last_pc} code={len(code1)}",
+    )
 
     # текстовый уровень: наивный roundtrip для стековой программы без
     # imm-операндов — восстановление исходника из листинга 1:1
@@ -118,13 +128,16 @@ start:
     src2_lines = [".title RT", ".data 1", "start:"]
     for ln in listing2:
         body = ln.split(":", 1)[1].strip()
-        if "->" in body:      # jmp: пересчитываем по последней метке
+        if "->" in body:  # jmp: пересчитываем по последней метке
             src2_lines.append("jmp start")
             continue
         src2_lines.append(body.lower())
     b2 = xlas.assemble("\n".join(src2_lines))
-    check("roundtrip: текст -> bin -> текст -> bin (стековая)", b1 == b2,
-          f"{len(b1)} vs {len(b2)}")
+    check(
+        "roundtrip: текст -> bin -> текст -> bin (стековая)",
+        b1 == b2,
+        f"{len(b1)} vs {len(b2)}",
+    )
     if b1 != b2:
         for i, (a, b) in enumerate(zip(b1, b2, strict=False)):
             if a != b:
@@ -192,11 +205,18 @@ def test_snake_real() -> None:
     listing = xla_disasm.disasm(code, pool)
     check("snake: титул SNAKE", title == "SNAKE", title)
     unknowns = [ln for ln in listing if "НЕИЗВЕСТНЫЙ" in ln]
-    check("snake: 0 неизвестных опкодов (GCPY!)", not unknowns,
-          f"{len(unknowns)} шт: {unknowns[:2]}")
+    check(
+        "snake: 0 неизвестных опкодов (GCPY!)",
+        not unknowns,
+        f"{len(unknowns)} шт: {unknowns[:2]}",
+    )
     # непрерывность: последний pc + размер инструкции == len(code)
     last_pc = int(listing[-1].split(":")[0].replace("pc=", ""))
-    check("snake: полный охват кода", last_pc <= len(code), f"last_pc={last_pc} code={len(code)}")
+    check(
+        "snake: полный охват кода",
+        last_pc <= len(code),
+        f"last_pc={last_pc} code={len(code)}",
+    )
 
 
 def main() -> None:

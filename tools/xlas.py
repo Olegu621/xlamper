@@ -22,6 +22,7 @@
 Порядок операндов стековый: значения кладутся как пишутся,
 VM-опкод снимает их в обратном порядке.
 """
+
 import re
 import struct
 import sys
@@ -37,7 +38,7 @@ class AsmError(Exception):
 
 
 IMM16_MNEMS = {m for m, k in KIND.items() if k == "IMM16"}  # push/gstore/gload/jmp...
-STR16_MNEMS = {m for m, k in KIND.items() if k == "STR16"}   # text/save/load/httpget
+STR16_MNEMS = {m for m, k in KIND.items() if k == "STR16"}  # text/save/load/httpget
 JUMP_MNEMS = {"jmp", "jz", "jnz", "call"}
 
 
@@ -122,7 +123,9 @@ def encode(prog: Program) -> bytes:
     def emit_push(v: int, lineno: int) -> None:
         if not -32768 <= v <= 65535:
             raise AsmError(f"{lineno}: push {v} вне int16")
-        code.extend(bytes([OPS["push"]]) + struct.pack("<h", v if v < 32768 else v - 65536))
+        code.extend(
+            bytes([OPS["push"]]) + struct.pack("<h", v if v < 32768 else v - 65536)
+        )
 
     for ln in prog.lines:
         if ln.op.endswith(":"):
@@ -222,7 +225,9 @@ def main() -> None:
     str_sz = blob[10] | (blob[11] << 8)
     title_len = blob[14] | (blob[15] << 8)
     title = blob[16 : 16 + title_len]
-    print(f"OK: {sys.argv[2]} ({len(blob)} bytes) code={code_sz} data={data_sz} str={str_sz} title={title!r}")
+    print(
+        f"OK: {sys.argv[2]} ({len(blob)} bytes) code={code_sz} data={data_sz} str={str_sz} title={title!r}"
+    )
 
 
 if __name__ == "__main__":

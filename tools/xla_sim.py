@@ -1,65 +1,84 @@
-"""
-xla_sim — симулятор XLA VM (C3 XLAMPER) на Python.
-Точная копия семантики VM из c3_flipper.ino (v1).
-Рисует в ASCII-канвас 128x64, события подаются скриптом.
-Использование: для отладки плагинов до заливки в железо.
+"""xla_sim.py — симулятор XLA VM на Python (1:1 с src/xla_vm.cpp).
+
+Назначение: отладка .xla-игр БЕЗ платы. Отрисовка — в терминал
+(ASCII-канвас 128x64), ввод — скриптованный/интерактивный.
+
+Семантика скопирована из прошивки v0.12:
+  * стек int16, GLOAD/GSTORE/GSTOREI/GLOADI/GCPY c границами;
+  * JMP/JZ/JNZ/CALL/RET (rel16 от PC после операнда);
+  * FRAME — граница кадра (возврат из step);
+  * SAVE/LOAD -> dict рекордов (title_key);
+  * RAND — детерминированный (seed) для воспроизводимых тестов;
+  * MSEC — виртуальное время (1 опкод = 1 мс условно);
+  * input: скрипт событий по кадрам.
 """
 
 import math
-import random as _r
 import struct
 import sys
-from dataclasses import dataclass, field
+from pathlib import Path
 
-_TRACE_G = False  # отладка: трассировка GLOADI на stderr
-_TRACE_RET = False  # отладка: печать CALL/RET на stderr
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gen_opcodes import KIND, NAMES  # noqa: E402
 
 W, H = 128, 64
-XLA_Y_OFF = 16  # синяя зона приложений (как XLA_Y_OFF в прошивке); 0..15 — жёлтый бар
-APP_H = H - XLA_Y_OFF  # 48: видимая высота канваса приложения
-STACK_MAX = 96
-RET_MAX = 16
-FRAME_INSN = 6000
-MAXCODE, MAXDATA, MAXSTR = 20000, 4096, 8000
-TITLELEN = 12
-
-HALT, FRAME, EXIT = 2, 1, 3
 
 
-class VMError(Exception):
-    pass
+def _f2i16(v: float) -> int:
+    """C-каст (int16_t)(float) для симулятора.
 
-
-def _safe_int(v) -> int:
-    """int() без исключений: конечная арифметика не падает,
-    но все точки конверсии обёрнуты единообразно."""
+    На плате аргумент всегда конечен (int16-домен), но сим не должен
+    падать на аномальном входе: int(inf)/int(nan) в Python бросают,
+    в C был бы мусор — возвращаем 0 (безопасный эквивалент UB).
+    """
     try:
         return int(v)
     except (ValueError, OverflowError):
         return 0
 
 
-@dataclass
-class Display:
-    px: list = field(default_factory=lambda: [[0] * W for _ in range(H)])
-    cx: int = 0
-    cy: int = 0
-    size: int = 1
+class Canvas:
+    """Монохромный канвас 128x64: 0/1 (+ c=0 стирает)."""
 
-    def clear(self):
+    def __init__(self) -> None:
         self.px = [[0] * W for _ in range(H)]
 
-    def setpixel(self, x, y, c):
+    def clear(self) -> None:
+        self.px = [[0] * W for _ in range(H)]
+
+    def point(self, x: int, y: int, c: int) -> None:
         if 0 <= x < W and 0 <= y < H:
             self.px[y][x] = 1 if c else 0
 
-    def line(self, x0, y0, x1, y1, c):
+    def rect(self, x: int, y: int, w: int, h: int, c: int) -> None:
+        if w <= 0 or h <= 0:
+            return
+        if c:
+            for yy in range(y, y + h):
+                for xx in range(x, x + w):
+                    self.point(xx, yy, 1)
+        else:
+            for yy in range(y, y + h):
+                for xx in range(x, x + w):
+                    self.point(xx, yy, 0)
+
+    def frame(self, x: int, y: int, w: int, h: int, c: int) -> None:
+        if w <= 0 or h <= 0:
+            return
+        for xx in range(x, x + w):
+            self.point(xx, y, c)
+            self.point(xx, y + h - 1, c)
+        for yy in range(y, y + h):
+            self.point(x, yy, c)
+            self.point(x + w - 1, yy, c)
+
+    def line(self, x0: int, y0: int, x1: int, y1: int, c: int) -> None:
         dx, dy = abs(x1 - x0), abs(y1 - y0)
         sx = 1 if x0 < x1 else -1
         sy = 1 if y0 < y1 else -1
         err = dx - dy
         while True:
-            self.setpixel(x0, y0, c)
+            self.point(x0, y0, c)
             if x0 == x1 and y0 == y1:
                 break
             e2 = 2 * err
@@ -70,616 +89,439 @@ class Display:
                 err += dx
                 y0 += sy
 
-    def rect(self, x, y, w, h, c, fill):
-        if w <= 0 or h <= 0:
+    def circle(self, x: int, y: int, r: int, c: int, fill: bool = False) -> None:
+        if r < 0:
             return
         if fill:
-            for yy in range(y, y + h):
-                for xx in range(x, x + w):
-                    self.setpixel(xx, yy, c)
+            for yy in range(y - r, y + r + 1):
+                half = _f2i16(math.sqrt(max(r * r - (yy - y) ** 2, 0)))
+                for xx in range(x - half, x + half + 1):
+                    self.point(xx, yy, c)
         else:
-            self.line(x, y, x + w - 1, y, c)
-            self.line(x, y + h - 1, x + w - 1, y + h - 1, c)
-            self.line(x, y, x, y + h - 1, c)
-            self.line(x + w - 1, y, x + w - 1, y + h - 1, c)
-
-    def disc(self, cx, cy, r, c):
-        for y in range(cy - r, cy + r + 1):
-            for x in range(cx - r, cx + r + 1):
-                if (x - cx) ** 2 + (y - cy) ** 2 <= r * r:
-                    self.setpixel(x, y, c)
-
-    def ellipse_fill(self, cx, cy, rx, ry, c):
-        if rx <= 0 or ry <= 0:
-            self.disc(cx, cy, max(rx, 1), c)
-            return
-        for y in range(cy - ry, cy + ry + 1):
-            for x in range(cx - rx, cx + rx + 1):
-                if ((x - cx) / rx) ** 2 + ((y - cy) / ry) ** 2 <= 1.0:
-                    self.setpixel(x, y, c)
-
-    def render(self) -> str:
-        """Точный рендер 1:1 — по строкам (64 строки по 128 символов)."""
-        return "\n".join(
-            "".join("#" if self.px[y][x] else "." for x in range(W)) for y in range(H)
-        )
-
-    def render_half(self) -> str:
-        """Сжатый рендер: 32 строки (пары пиксельных строк через OR)."""
-        rows = []
-        for band in range(0, H, 2):
-            rows.append(
-                "".join(
-                    "#" if (self.px[band][x] or self.px[band + 1][x]) else "."
-                    for x in range(W)
+            for a in range(0, 360, 2):
+                rad = math.radians(a)
+                self.point(
+                    x + _f2i16(r * math.cos(rad)), y + _f2i16(r * math.sin(rad)), c
                 )
+
+    def ellipse(self, x: int, y: int, rx: int, ry: int, c: int) -> None:
+        for a in range(0, 360, 2):
+            rad = math.radians(a)
+            self.point(
+                x + _f2i16(rx * math.cos(rad)), y + _f2i16(ry * math.sin(rad)), c
             )
+
+    def text(self, x: int, y: int, size: int, s: str) -> None:
+        # упрощённый 5x7 глиф по клеткам size (для отладки достаточно)
+        for i in range(min(len(s), 20)):
+            cx = x + i * 6 * size
+            self.frame(cx, y, 5 * size, 7 * size, 1)
+
+    def dump(self) -> str:
+        rows = []
+        for y in range(0, H, 2):
+            rows.append("".join("#" if self.px[y][x] else "." for x in range(0, W, 2)))
         return "\n".join(rows)
 
 
-@dataclass
-class Sim:
-    code: bytes
-    data: list
-    strings: bytes
-    entry: int
-    title: str
-    disp: Display = field(default_factory=Display)
-    pc: int = 0
-    sp: int = 0
-    stack: list = field(default_factory=list)
-    ret: list = field(default_factory=list)
-    running: bool = True
-    err: str = ""
-    ev: int = 0  # текущее событие (кадр)
-    nvs: dict = field(default_factory=dict)
-    t0: float = 0.0
-    vtime_ms: int = 0  # виртуальное время: +16мс за кадр (≈60fps как на железе)
-    frames: int = 0
-    budget_used: int = 0
-    logs: list = field(default_factory=list)
-    http_buf: bytes = b""  # ответ HTTPGET (интернет-приложения)
-    http_len: int = -1
-    stick_x: int = 2048  # аналоговый стик для симуляции (2048 = центр)
-    stick_y: int = 2048
+class VmError(Exception):
+    pass
 
-    # ---- fetch ----
-    def f8(self):
+
+class Sim:
+    def __init__(self, blob: bytes, seed: int = 1234) -> None:
+        if blob[:4] != b"XLA1":
+            raise VmError("not XLA1")
+        code_sz = struct.unpack_from("<H", blob, 6)[0]
+        data_sz = struct.unpack_from("<H", blob, 8)[0]
+        str_sz = struct.unpack_from("<H", blob, 10)[0]
+        self.entry = struct.unpack_from("<H", blob, 12)[0]
+        tl = struct.unpack_from("<H", blob, 14)[0]
+        self.title = blob[16 : 16 + tl].decode("utf-8", "replace")
+        off = 16 + tl
+        self.code = blob[off : off + code_sz]
+        off += code_sz
+        self.data = (
+            list(struct.unpack_from(f"<{data_sz // 2}h", blob, off)) if data_sz else [0]
+        )
+        off += data_sz
+        self.str = blob[off : off + str_sz]
+
+        self.pc = self.entry
+        self.stack: list[int] = []
+        self.returns: list[int] = []
+        self.err = ""
+        self.err_pc = 0
+        self.running = True
+        self.exited = False
+        self.frame_count = 0
+        self.msec = 0
+        self.rng_state = seed & 0xFFFFFFFF or 1
+        self.scores: dict[str, int] = {}
+        self.canvas = Canvas()
+        self.event = 0  # текущее событие (скриптованное)
+        self.hold = 0
+        self.ops_total = 0
+        self.beeps: list[tuple[int, int]] = []  # (freq, ms) — аудит звука
+
+    # --- примитивы ---
+    def _push(self, v: int) -> None:
+        if len(self.stack) >= 96:
+            raise VmError("stack ovf")
+        # как в C: int16_t — храним знаковое значение
+        self.stack.append(self._s16(v & 0xFFFF))
+
+    def _pop(self) -> int:
+        if not self.stack:
+            raise VmError("stack und")
+        return self.stack.pop()
+
+    def _s16(self, v: int) -> int:
+        return v - 0x10000 if v & 0x8000 else v
+
+    def _f8(self) -> int:
         if self.pc >= len(self.code):
-            raise VMError("PC OOB")
+            raise VmError("PC OOB")
         b = self.code[self.pc]
         self.pc += 1
         return b
 
-    def f16(self):
-        lo = self.f8()
-        hi = self.f8()
-        return (hi << 8) | lo
+    def _f16(self) -> int:
+        lo = self._f8()
+        hi = self._f8()
+        return self._s16((hi << 8) | lo)
 
-    def s16(self):
-        v = self.f16()
-        return v - 65536 if v >= 32768 else v
+    def _str_at(self, off: int) -> str:
+        if off >= len(self.str):
+            raise VmError("str OOB")
+        end = self.str.find(b"\x00", off)
+        if end < 0:
+            end = len(self.str)
+        return self.str[off:end].decode("utf-8", "replace")
 
-    def str_at(self, off):
-        if off >= len(self.strings):
-            raise VMError("str OOB")
-        end = self.strings.index(b"\x00", off)
-        return self.strings[off:end].decode("utf-8", "replace")
+    def _g_ok(self, idx: int) -> bool:
+        return 0 <= idx < len(self.data)
 
-    def push(self, v):
-        if len(self.stack) >= STACK_MAX:
-            raise VMError("stack ovf")
-        self.stack.append(v)
+    def _rand(self, m: int) -> int:
+        # xorshift32 — детерминированный
+        x = self.rng_state
+        x ^= (x << 13) & 0xFFFFFFFF
+        x ^= x >> 17
+        x ^= (x << 5) & 0xFFFFFFFF
+        self.rng_state = x
+        return (x % m) if m > 0 else 0
 
-    def pop(self):
-        if not self.stack:
-            raise VMError("stack und")
-        return self.stack.pop()
+    # --- кадр: опкоды до FRAME/ошибки/бюджета ---
+    def step(self, event: int = 0, budget: int = 6000) -> str:
+        """Один кадр. Возвращает 'frame' | 'halt' | 'exit'."""
+        self.event = event
+        self.ops_total += 1
+        self.msec += 16  # ~60 fps
+        n = 0
+        while n < budget:
+            n += 1
+            if self.pc >= len(self.code):
+                return "halt"
+            op = self.code[self.pc]
+            self.pc += 1
+            mnem = NAMES.get(op)
+            if mnem is None:
+                self.err = f"bad op {op:02X}"
+                self.err_pc = self.pc
+                raise VmError(self.err)
+            m = mnem.lower()
+            kind = KIND[m]
 
-    def msec(self):
-        # виртуальные часы: продвигаются только на границе кадров (frame/step)
-        return self.vtime_ms & 0x7FFF
+            if m == "halt":
+                return "halt"
+            if m == "frame":
+                self.frame_count += 1
+                return "frame"
+            if m == "exit":
+                self.exited = True
+                return "exit"
 
-    def key(self, k):
-        return f"{self.title}_{k}"
-
-    # один кадр; ev: 0 none, 1 up, 2 down, 3 left, 4 right, 5 ok, 6 exit
-    def step(self, ev: int = 0) -> int:
-        self.ev = ev
-        budget = FRAME_INSN
-        while budget:
-            budget -= 1
-            op = self.f8()
-            if op == 0x00:
-                return HALT
-            elif op == 0x01:
-                self.push(self.s16())
-            elif op == 0x02:
-                v = self.pop()
-                self.push(v)
-                self.push(v)
-            elif op == 0x03:
-                self.pop()
-            elif op == 0x04:
-                b, a = self.pop(), self.pop()
-                self.push(b)
-                self.push(a)
-            elif op == 0x05:
-                b, a = self.pop(), self.pop()
-                self.push(a)
-                self.push(b)
-                self.push(a)
-            elif op == 0x06:
-                n = self.pop()
-                i = len(self.stack) - 1 - n
-                self.push(self.stack[i] if 0 <= i < len(self.stack) else 0)
-            elif op == 0x20:
-                b, a = self.pop(), self.pop()
-                self.push(_w(a + b))
-            elif op == 0x21:
-                b, a = self.pop(), self.pop()
-                self.push(_w(a - b))
-            elif op == 0x22:
-                b, a = self.pop(), self.pop()
-                self.push(_w(a * b))
-            elif op == 0x23:
-                b, a = self.pop(), self.pop()
-                if b == 0:
-                    raise VMError("div0")
-                self.push(_w(_safe_int(a / b)))  # C-style trunc div
-            elif op == 0x24:
-                b, a = self.pop(), self.pop()
-                if b == 0:
-                    raise VMError("mod0")
-                self.push(_w(a - _safe_int(a / b) * b))  # C-style trunc mod
-            elif op == 0x25:
-                self.push(_w(-self.pop()))
-            elif op == 0x26:
-                b, a = self.pop(), self.pop()
-                self.push(min(a, b))
-            elif op == 0x27:
-                b, a = self.pop(), self.pop()
-                self.push(max(a, b))
-            elif op == 0x28:
-                a = self.pop()
-                self.push(abs(a))
-            elif op == 0x30:
-                b, a = self.pop(), self.pop()
-                self.push(1 if a == b else 0)
-            elif op == 0x31:
-                b, a = self.pop(), self.pop()
-                self.push(1 if a != b else 0)
-            elif op == 0x32:
-                b, a = self.pop(), self.pop()
-                self.push(1 if a < b else 0)
-            elif op == 0x33:
-                b, a = self.pop(), self.pop()
-                self.push(1 if a <= b else 0)
-            elif op == 0x34:
-                b, a = self.pop(), self.pop()
-                self.push(1 if a > b else 0)
-            elif op == 0x35:
-                b, a = self.pop(), self.pop()
-                self.push(1 if a >= b else 0)
-            elif op == 0x36:
-                b, a = self.pop(), self.pop()
-                self.push(1 if (a != 0 and b != 0) else 0)
-            elif op == 0x37:
-                b, a = self.pop(), self.pop()
-                self.push(1 if (a != 0 or b != 0) else 0)
-            elif op == 0x38:
-                b, a = self.pop(), self.pop()
-                self.push(1 if (a != 0) != (b != 0) else 0)
-            elif op == 0x39:
-                self.push(1 if self.pop() == 0 else 0)
-            elif op == 0x45:
-                idx = self.f16()
-                v = self.pop()
-                if idx >= len(self.data):
-                    raise VMError("g OOB")
-                self.data[idx] = v
-            elif op == 0x46:
-                idx = self.f16()
-                if idx >= len(self.data):
-                    raise VMError(
-                        f"g OOB gload imm={idx} len={len(self.data)} pc0={self.pc - 1}"
-                    )
-                self.push(self.data[idx])
-            elif op == 0x47:
-                idx = self.pop()
-                v = self.pop()
-                if idx < 0 or idx >= len(self.data):
-                    raise VMError("g OOB")
-                self.data[idx] = v
-            elif op == 0x48:
-                idx = self.pop()
-                if _TRACE_G:
-                    print(
-                        f"GLOADI idx={idx} frames={self.frames} stack={self.stack}",
-                        file=sys.stderr,
-                    )
-                if idx < 0 or idx >= len(self.data):
-                    print(
-                        f"DBG g8(i)={self.data[8]} g0(len)={self.data[0]} frames={self.frames} pc={self.pc} stack={self.stack}",
-                        file=sys.stderr,
-                    )
-                    raise VMError(
-                        f"g OOB gloadi idx={idx} len={len(self.data)} pc0={self.pc - 1}"
-                    )
-                self.push(self.data[idx])
-            elif op == 0x49:
-                n = self.pop()
-                dst = self.pop()
-                src = self.pop()
-                if (
-                    n < 0
-                    or src < 0
-                    or dst < 0
-                    or src + n > len(self.data)
-                    or dst + n > len(self.data)
-                ):
-                    raise VMError("gcp OOB")
-                chunk = self.data[src : src + n]
-                self.data[dst : dst + n] = chunk
-            elif op == 0x50:
-                rel = self.s16()
-                self.pc = _w(self.pc + rel) & 0xFFFF
-            elif op == 0x51:
-                rel = self.s16()
-                if self.pop() == 0:
-                    self.pc = _w(self.pc + rel) & 0xFFFF
-            elif op == 0x52:
-                rel = self.s16()
-                if self.pop() != 0:
-                    self.pc = _w(self.pc + rel) & 0xFFFF
-            elif op == 0x53:
-                rel = self.s16()
-                if _TRACE_RET:
-                    print(
-                        f"CALL pc={self.pc - 3} -> {self.pc + rel} depth={len(self.ret)}",
-                        file=sys.stderr,
-                    )
-                if len(self.ret) >= RET_MAX:
-                    raise VMError("ret ovf")
-                self.ret.append(self.pc)
-                self.pc = _w(self.pc + rel) & 0xFFFF
-            elif op == 0x54:
-                if _TRACE_RET:
-                    print(
-                        f"RET pc={self.pc - 1} depth={len(self.ret)}", file=sys.stderr
-                    )
-                if not self.ret:
-                    raise VMError("ret und")
-                self.pc = self.ret.pop()
-            elif op == 0x5F:
-                self.vtime_ms += 16  # виртуальный кадр ≈ 60fps железа
-                if self.stack:
-                    print(
-                        f"WARN stack@frame: {self.stack} pc={self.pc - 1}",
-                        file=sys.stderr,
-                    )
-                return FRAME
-            elif op == 0x60:
-                c, y, x = self.pop(), self.pop(), self.pop()
-                self.disp.setpixel(x, y + XLA_Y_OFF, c)
-            elif op == 0x61:
-                c, y1, x1, y0, x0 = (
-                    self.pop(),
-                    self.pop(),
-                    self.pop(),
-                    self.pop(),
-                    self.pop(),
-                )
-                self.disp.line(x0, y0 + XLA_Y_OFF, x1, y1 + XLA_Y_OFF, c)
-            elif op == 0x62:
-                c, h, w, y, x = (
-                    self.pop(),
-                    self.pop(),
-                    self.pop(),
-                    self.pop(),
-                    self.pop(),
-                )
-                self.disp.rect(x, y + XLA_Y_OFF, w, h, c, fill=False)
-            elif op == 0x63:
-                c, h, w, y, x = (
-                    self.pop(),
-                    self.pop(),
-                    self.pop(),
-                    self.pop(),
-                    self.pop(),
-                )
-                self.disp.rect(x, y + XLA_Y_OFF, w, h, c, fill=True)
-            elif op == 0x64:
-                c, r, y, x = self.pop(), self.pop(), self.pop(), self.pop()
-                # окружность — по пикселям
-                for a in range(0, 360, 2):
-                    rad = math.radians(a)
-                    self.disp.setpixel(
-                        _safe_int(x + r * math.cos(rad)),
-                        _safe_int(y + XLA_Y_OFF + r * math.sin(rad)),
-                        c,
-                    )
-            elif op == 0x65:
-                c, r, y, x = self.pop(), self.pop(), self.pop(), self.pop()
-                self.disp.disc(x, y + XLA_Y_OFF, r, c)
-            elif op == 0x66:
-                c, ry, rx, y, x = (
-                    self.pop(),
-                    self.pop(),
-                    self.pop(),
-                    self.pop(),
-                    self.pop(),
-                )
-                self.disp.ellipse_fill(x, y + XLA_Y_OFF, rx, ry, c)
-            elif op == 0x67:
-                off = self.f16()
-                f, y, x = self.pop(), self.pop(), self.pop()
-                s = self.str_at(off)
-                self.disp.cx, self.disp.cy, self.disp.size = x, y + XLA_Y_OFF, f
-                self._text(s)
-            elif op == 0x68:
-                pass  # invert flash — в симе просто мигнуть
-            elif op == 0x69:
-                c = self.pop()
-                self.disp.rect(0, XLA_Y_OFF, W, H - XLA_Y_OFF, c, fill=True)
-            elif op == 0x6A:
-                # CLS: только синяя зона (как на железе — статус-бар живёт отдельно)
-                self.disp.rect(0, XLA_Y_OFF, W, H - XLA_Y_OFF, 0, fill=True)
-            elif op == 0x6B:
-                self.frames += 1
-            elif op == 0x70:
-                self.push(self.msec() & 0x7FFF)
-            elif op == 0x71:
-                m = self.pop()
-                self.push(0 if m <= 0 else _r.randrange(m))
-            elif op == 0x72:
-                ms, f = self.pop(), self.pop()
-                # beep в симуляторе — печать
-                self.logs.append(f"beep({f},{ms})")
-            elif op == 0x73:
-                return EXIT
-            elif op == 0x74:
-                koff = self.f16()
-                v = self.pop()
-                self.nvs[self.key(self.str_at(koff))] = v
-            elif op == 0x75:
-                koff = self.f16()
-                d = self.pop()
-                self.push(self.nvs.get(self.key(self.str_at(koff)), d))
-            elif op == 0x76:
-                v = self.pop()
-                self.logs.append(f"log({v})")
-            elif op == 0x77:
-                v = self.pop()
-                f = self.pop()
-                y = self.pop()
-                x = self.pop()
-                self.disp.cx, self.disp.cy, self.disp.size = x, y + XLA_Y_OFF, f
-                self._text(str(v))
-            elif op == 0x78:
-                # HTTPGET strIdx — в симуляторе: urllib в этот URL (для отладки парсинга)
-                import urllib.request as _ur
-
-                koff = self.f16()
-                url = self.str_at(koff)
-                self.http_buf = b""
-                try:
-                    with _ur.urlopen(url, timeout=8) as r:  # noqa: S310
-                        self.http_buf = r.read()[:1400]
-                    self.http_len = len(self.http_buf)
-                except OSError:
-                    self.http_len = -1
-                self.push(self.http_len)
-            elif op == 0x79:
-                i = self.pop()
-                c = self.http_buf[i] if 0 <= i < len(self.http_buf) else 0
-                self.push(c)
-            elif op == 0x7B:
-                # WGET dst cnt: HTTP-ответ -> data-секция int16-словами.
-                # «бесконечная память из облака»: приложение тянет данные
-                # (миди, спрайты, уровни) прямо в свои глобалы.
-                cnt = self.pop()
-                dst = self.pop()
-                if (
-                    cnt < 0
-                    or dst < 0
-                    or dst + cnt > len(self.data)
-                    or self.http_len < 0
-                ):
-                    raise VMError("wget OOB")
-                n = min(cnt * 2, len(self.http_buf))
-                words = n // 2
-                for w in range(cnt):
-                    self.data[dst + w] = 0
-                for w in range(words):
-                    lo = self.http_buf[w * 2]
-                    hi = self.http_buf[w * 2 + 1]
-                    self.data[dst + w] = (hi << 8) | lo
-                self.push(words)
-            elif op == 0x7A:
-                ms = self.pop()
-                self.logs.append(f"delay({ms})")
-            elif op == 0x80:
-                # стик X: аналоговое положение 0..4095 (2048 = центр)
-                self.push(self.stick_x)
-            elif op == 0x81:
-                # стик Y: аналоговое положение 0..4095 (2048 = центр, вниз = больше)
-                self.push(self.stick_y)
-            elif op == 0x82:
-                # стик: маппинг события -> 8-way (0 up, 2 right, 4 down, 6 left); idle -> -1
-                evmap = {1: 0, 2: 4, 3: 6, 4: 2}  # ev: 1 up, 2 down, 3 left, 4 right
-                self.push(evmap.get(self.ev, -1))
-            elif op == 0x83:
-                self.push(self.ev)
-            elif op == 0x84:
-                self.push(0)
-            elif op == 0x90:
-                a = self.pop()
-                self.push(_safe_int(math.sin(math.radians(a)) * 1000))
-            elif op == 0x91:
-                a = self.pop()
-                self.push(_safe_int(math.cos(math.radians(a)) * 1000))
-            elif op == 0x92:
-                v = self.pop()
-                self.push(0 if v <= 0 else _safe_int(math.sqrt(v) + 0.5))
-            else:
-                raise VMError(f"bad op {op:02X} @pc={self.pc - 1}")
-        return 0
-
-    def _text(self, s: str) -> None:
-        # крошечный 3x5 ASCII для симуляции
-        FONT = {
-            "A": ["010", "101", "111", "101", "101"],
-            "B": ["110", "101", "110", "101", "110"],
-            "C": ["011", "100", "100", "100", "011"],
-            "D": ["110", "101", "101", "101", "110"],
-            "E": ["111", "100", "110", "100", "111"],
-            "F": ["111", "100", "110", "100", "100"],
-            "G": ["011", "100", "101", "101", "011"],
-            "H": ["101", "101", "111", "101", "101"],
-            "I": ["111", "010", "010", "010", "111"],
-            "J": ["001", "001", "001", "101", "011"],
-            "K": ["101", "101", "110", "101", "101"],
-            "L": ["100", "100", "100", "100", "111"],
-            "M": ["101", "111", "111", "101", "101"],
-            "N": ["110", "101", "101", "101", "101"],
-            "O": ["010", "101", "101", "101", "010"],
-            "P": ["110", "101", "110", "100", "100"],
-            "Q": ["010", "101", "101", "111", "011"],
-            "R": ["110", "101", "110", "101", "101"],
-            "S": ["011", "100", "010", "001", "110"],
-            "T": ["111", "010", "010", "010", "010"],
-            "U": ["101", "101", "101", "101", "111"],
-            "V": ["101", "101", "101", "101", "010"],
-            "W": ["101", "101", "111", "111", "101"],
-            "X": ["101", "101", "010", "101", "101"],
-            "Y": ["101", "101", "010", "010", "010"],
-            "Z": ["111", "001", "010", "100", "111"],
-            "0": ["111", "101", "101", "101", "111"],
-            "1": ["010", "110", "010", "010", "111"],
-            "2": ["111", "001", "111", "100", "111"],
-            "3": ["111", "001", "011", "001", "111"],
-            "4": ["101", "101", "111", "001", "001"],
-            "5": ["111", "100", "111", "001", "111"],
-            "6": ["111", "100", "111", "101", "111"],
-            "7": ["111", "001", "001", "010", "010"],
-            "8": ["111", "101", "111", "101", "111"],
-            "9": ["111", "101", "111", "001", "111"],
-            "!": ["1", "1", "1", "0", "1"],
-            ".": ["0", "0", "0", "0", "1"],
-            ":": ["0", "1", "0", "1", "0"],
-            " ": ["0", "0", "0", "0", "0"],
-            "=": ["0", "0", "1", "0", "1"],
-            "/": ["0", "0", "0", "0", "0"],
-            "-": ["0", "0", "0", "0", "0"],
-            ">": ["0", "0", "0", "0", "0"],
-        }
-        x, y = self.disp.cx, self.disp.cy
-        scale = max(1, self.disp.size)
-        for ch in s.upper():
-            glyph = FONT.get(ch, FONT[" "])
-            for gy, row in enumerate(glyph):
-                if len(row) == 1:
-                    cols = [row]
+            if kind == "IMM16":
+                v = self._f16()
+                if m == "push":
+                    self._push(v)
+                elif m == "gstore":
+                    if self._g_ok(v):
+                        self.data[v] = self._pop()
+                    else:
+                        raise VmError("g OOB")
+                elif m == "gload":
+                    if self._g_ok(v):
+                        self._push(self.data[v])
+                    else:
+                        raise VmError("g OOB")
+                else:  # jmp/jz/jnz/call
+                    if m == "jmp":
+                        self.pc += v
+                    elif m == "jz":
+                        if self._pop() == 0:
+                            self.pc += v
+                    elif m == "jnz":
+                        if self._pop() != 0:
+                            self.pc += v
+                    elif m == "call":
+                        self.returns.append(self.pc)
+                        self.pc += v
+            elif kind == "STR16":
+                soff = struct.unpack("<H", struct.pack("<h", self._f16()))[0]
+                if m == "save":
+                    v = self._pop()
+                    self.scores[f"{self.title}_{self._str_at(soff)}"] = v
+                elif m == "load":
+                    key = f"{self.title}_{self._str_at(soff)}"
+                    self._push(self.scores.get(key, self._pop()))
+                elif m == "text":
+                    f = self._pop()
+                    y = self._pop()
+                    x = self._pop()
+                    self.canvas.text(x, y, f, self._str_at(soff))
                 else:
-                    cols = row
-                for gx, c in enumerate(cols):
-                    if c == "1":
-                        if scale == 1:
-                            self.disp.setpixel(x + gx, y + gy, 1)
-                        else:
-                            self.disp.rect(
-                                x + gx * scale,
-                                y + gy * scale,
-                                scale,
-                                scale,
-                                1,
-                                fill=True,
-                            )
-            x += (max(len(r) for r in glyph) + 1) * scale
+                    raise VmError(f"sim: {m} не поддержан (нет сети)")
+            else:
+                # стековые
+                if m == "dup":
+                    v = self._pop()
+                    self._push(v)
+                    self._push(v)
+                elif m == "drop":
+                    self._pop()
+                elif m == "swap":
+                    b = self._pop()
+                    a = self._pop()
+                    self._push(b)
+                    self._push(a)
+                elif m == "over":
+                    b = self._pop()
+                    a = self._pop()
+                    self._push(a)
+                    self._push(b)
+                    self._push(a)
+                elif m == "pick":
+                    nn = self._pop()
+                    if 0 <= nn < len(self.stack):
+                        self._push(self.stack[-1 - nn])
+                    else:
+                        self._push(0)
+                elif m in (
+                    "add",
+                    "sub",
+                    "mul",
+                    "div",
+                    "mod",
+                    "min",
+                    "max",
+                    "eq",
+                    "ne",
+                    "lt",
+                    "le",
+                    "gt",
+                    "ge",
+                    "and",
+                    "or",
+                    "xor",
+                ):
+                    b = self._pop()
+                    a = self._pop()
+                    if m == "add":
+                        r = a + b
+                    elif m == "sub":
+                        r = a - b
+                    elif m == "mul":
+                        r = a * b
+                    elif m == "div":
+                        if b == 0:
+                            raise VmError("div0")
+                        # C-деление (усечение к нулю)
+                        r = abs(a) // abs(b) * (1 if (a < 0) == (b < 0) else -1)
+                    elif m == "mod":
+                        if b == 0:
+                            raise VmError("mod0")
+                        r = a - b * (
+                            abs(a) // abs(b) * (1 if (a < 0) == (b < 0) else -1)
+                        )
+                    elif m == "min":
+                        r = min(a, b)
+                    elif m == "max":
+                        r = max(a, b)
+                    elif m == "eq":
+                        r = 1 if a == b else 0
+                    elif m == "ne":
+                        r = 1 if a != b else 0
+                    elif m == "lt":
+                        r = 1 if a < b else 0
+                    elif m == "le":
+                        r = 1 if a <= b else 0
+                    elif m == "gt":
+                        r = 1 if a > b else 0
+                    elif m == "ge":
+                        r = 1 if a >= b else 0
+                    elif m == "and":
+                        r = 1 if a != 0 and b != 0 else 0
+                    elif m == "or":
+                        r = 1 if a != 0 or b != 0 else 0
+                    else:
+                        r = 1 if (a != 0) != (b != 0) else 0
+                    self._push(self._s16(r & 0xFFFF))
+                elif m == "neg":
+                    self._push(self._s16(-self._pop() & 0xFFFF))
+                elif m == "abs":
+                    v = self._pop()
+                    self._push(abs(v))
+                elif m == "not":
+                    self._push(1 if self._pop() == 0 else 0)
+                elif m == "gstorei":
+                    idx = self._pop()
+                    v = self._pop()
+                    if self._g_ok(idx):
+                        self.data[idx] = v
+                    else:
+                        raise VmError("g OOB")
+                elif m == "gloadi":
+                    idx = self._pop()
+                    if self._g_ok(idx):
+                        self._push(self.data[idx])
+                    else:
+                        raise VmError("g OOB")
+                elif m == "gcpy":
+                    n_ = self._pop()
+                    dst = self._pop()
+                    src = self._pop()
+                    if (
+                        n_ < 0
+                        or src < 0
+                        or dst < 0
+                        or src + n_ > len(self.data)
+                        or dst + n_ > len(self.data)
+                    ):
+                        raise VmError("gcpy OOB")
+                    if dst > src:
+                        for i in range(n_ - 1, -1, -1):
+                            self.data[dst + i] = self.data[src + i]
+                    else:
+                        for i in range(n_):
+                            self.data[dst + i] = self.data[src + i]
+                elif m == "ret":
+                    if not self.returns:
+                        raise VmError("ret und")
+                    self.pc = self.returns.pop()
+                elif m == "px":
+                    c = self._pop()
+                    y = self._pop()
+                    x = self._pop()
+                    self.canvas.point(x, y, c)
+                elif m == "line":
+                    c = self._pop()
+                    y1 = self._pop()
+                    x1 = self._pop()
+                    y0 = self._pop()
+                    x0 = self._pop()
+                    self.canvas.line(x0, y0, x1, y1, c)
+                elif m == "rect":
+                    c = self._pop()
+                    h = self._pop()
+                    w_ = self._pop()
+                    y = self._pop()
+                    x = self._pop()
+                    self.canvas.frame(x, y, w_, h, c)
+                elif m == "frect":
+                    c = self._pop()
+                    h = self._pop()
+                    w_ = self._pop()
+                    y = self._pop()
+                    x = self._pop()
+                    self.canvas.rect(x, y, w_, h, c)
+                elif m == "circ":
+                    c = self._pop()
+                    r = self._pop()
+                    y = self._pop()
+                    x = self._pop()
+                    self.canvas.circle(x, y, r, c)
+                elif m == "fcirc":
+                    c = self._pop()
+                    r = self._pop()
+                    y = self._pop()
+                    x = self._pop()
+                    self.canvas.circle(x, y, r, c, fill=True)
+                elif m == "ell":
+                    c = self._pop()
+                    ry = self._pop()
+                    rx = self._pop()
+                    y = self._pop()
+                    x = self._pop()
+                    self.canvas.ellipse(x, y, rx, ry, c)
+                elif m == "inv":
+                    pass  # визуально в терминале не важно
+                elif m == "fill":
+                    self.canvas.rect(0, 0, W, H, self._pop())
+                elif m == "cls":
+                    self.canvas.clear()
+                elif m == "disp":
+                    pass  # кадр рисуется — dump() смотрим в тестах
+                elif m == "msec":
+                    self._push(self.msec & 0x7FFF)
+                elif m == "rand":
+                    self._push(self._rand(self._pop()))
+                elif m == "beep":
+                    ms = self._pop()
+                    f = self._pop()
+                    self.beeps.append((f, ms))
+                elif m == "log":
+                    self._pop()
+                elif m == "num":
+                    v = self._pop()
+                    f = self._pop()
+                    y = self._pop()
+                    x = self._pop()
+                    self.canvas.text(x, y, f, str(v))
+                elif m == "delay":
+                    self._pop()
+                elif m == "stx" or m == "sty":
+                    self._push(2048)
+                elif m == "stick":
+                    self._push(-1)
+                elif m == "event":
+                    self._push(self.event)
+                elif m == "hold":
+                    self._push(self.hold)
+                elif m == "sin":
+                    a = self._pop()
+                    self._push(_f2i16(math.sin(math.radians(a)) * 1000))
+                elif m == "cos":
+                    a = self._pop()
+                    self._push(_f2i16(math.cos(math.radians(a)) * 1000))
+                elif m == "sqrt":
+                    v = self._pop()
+                    self._push(0 if v <= 0 else _f2i16(math.sqrt(v) + 0.5))
+                else:
+                    raise VmError(f"sim: не реализован {m}")
+        return "budget"
 
 
-def _w(v: int) -> int:
-    v &= 0xFFFF
-    return v - 65536 if v >= 32768 else v
-
-
-def load(blob: bytes) -> Sim:
-    if len(blob) < 18 or blob[:4] != b"XLA1" or blob[4] != 1:
-        raise VMError("bad header")
-    code_sz = blob[6] | (blob[7] << 8)
-    data_sz = blob[8] | (blob[9] << 8)
-    str_sz = blob[10] | (blob[11] << 8)
-    entry = blob[12] | (blob[13] << 8)
-    tl = blob[14] | (blob[15] << 8)
-    if tl == 0 or tl > TITLELEN:
-        raise VMError("bad title len")
-    p = 16
-    title = blob[p : p + tl].decode()
-    p += tl
-    code = blob[p : p + code_sz]
-    p += code_sz
-    data_raw = blob[p : p + data_sz]
-    p += data_sz
-    strings = blob[p : p + str_sz]
-    if len(code) != code_sz or len(data_raw) != data_sz or len(strings) != str_sz:
-        raise VMError("truncated")
-    data = list(struct.unpack(f"<{data_sz // 2}h", data_raw)) if data_sz else []
-    if data_sz % 2:
-        raise VMError("odd data size")
-    return Sim(code=code, data=data, strings=strings, entry=entry, title=title)
-
-
-def main() -> None:
-    if len(sys.argv) < 2:
-        print("usage: python xla_sim.py app.xla [--script events]")
-        sys.exit(2)
-    try:
-        with open(sys.argv[1], "rb") as fh:
-            blob = fh.read()
-        sim = load(blob)
-    except OSError as exc:
-        print(f"cannot read {sys.argv[1]}: {exc}", file=sys.stderr)
-        sys.exit(1)
-    except VMError as exc:
-        print(f"bad xla: {exc}", file=sys.stderr)
-        sys.exit(1)
-    print(
-        f"loaded {sim.title}: code={len(sim.code)} data={len(sim.data)} str={len(sim.strings)}"
-    )
-    # --script 5,5,0,0,6  — список событий через запятую; иначе дефолт rootbear-сценарий
-    # --headless — не печатать промежуточные кадры (быстрая проверка на VM-ошибки)
-    script = None
-    headless = "--headless" in sys.argv
-    for a in sys.argv[2:]:
-        if a.startswith("--script"):
-            try:
-                script = [int(x) for x in a.split("=", 1)[1].split(",") if x != ""]
-            except (ValueError, IndexError):
-                print("bad --script (пример: --script=0,0,5,0)", file=sys.stderr)
-                sys.exit(2)
-    if script is None:
-        script = [0, 0, 0, 5] + [0] * 40 + [5] + [0] * 3 + [6]
-    try:
-        for ev in script:
-            r = sim.step(ev)
-            if r == HALT:
-                print("HALT")
-                break
-            if r == EXIT:
-                print("EXIT")
-                break
-            if not headless and sim.frames % 10 == 0:
-                print(f"--- frame {sim.frames} (pc={sim.pc}, sp={len(sim.stack)}) ---")
-                print(sim.disp.render())
-    except VMError as exc:
-        print(f"VM ERROR: {exc} @pc={sim.pc}", file=sys.stderr)
-        sys.exit(1)
-    print(f"done: frames={sim.frames}, stack={sim.stack}, nvs={sim.nvs}")
-    print(sim.disp.render())
-    for line in sim.logs[-20:]:
-        print("log:", line)
+def run_frames(blob: bytes, events: list[int], seed: int = 1234) -> Sim:
+    """Прогнать кадры по скрипту событий. events[i] — EV на кадр i."""
+    sim = Sim(blob, seed)
+    for ev in events:
+        r = sim.step(ev)
+        if r in ("halt", "exit"):
+            break
+    return sim
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) != 2:
+        print("usage: python xla_sim.py app.xla")
+        sys.exit(2)
+    sim = Sim(Path(sys.argv[1]).read_bytes())
+    # интерактив: 100 кадров без событий
+    for i in range(100):
+        r = sim.step(0)
+        if r != "frame":
+            print(f"->{r} на кадре {i}")
+            break
+    print(f"кадров: {sim.frame_count}, ops: {sim.ops_total}")
+    print(sim.canvas.dump())

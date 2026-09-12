@@ -10,6 +10,7 @@ v0.11 (помечал их как ?49, сбивая адресацию).
     python xla_disasm.py app.xla 100..200   # диапазон pc
     python xla_disasm.py app.xla @123       # с pc=123 до конца
 """
+
 import struct
 import sys
 from pathlib import Path
@@ -52,7 +53,9 @@ def pool_string_at(pool: bytes, off: int) -> str:
     return pool[off:end].decode("utf-8", "replace")
 
 
-def disasm(code: bytes, pool: bytes, start: int = 0, end: int | None = None) -> list[str]:
+def disasm(
+    code: bytes, pool: bytes, start: int = 0, end: int | None = None
+) -> list[str]:
     out = []
     pc = start
     stop = len(code) if end is None else min(end, len(code))
@@ -81,7 +84,7 @@ def disasm(code: bytes, pool: bytes, start: int = 0, end: int | None = None) -> 
                 break
             soff = struct.unpack_from("<H", code, pc + 1)[0]
             s = pool_string_at(pool, soff) if soff < len(pool) else "<OOB>"
-            out.append(f"pc={pc:4d}: {mnem:<8} \"{s}\" (str@{soff})")
+            out.append(f'pc={pc:4d}: {mnem:<8} "{s}" (str@{soff})')
             pc += 3
         else:
             out.append(f"pc={pc:4d}: {mnem}")
