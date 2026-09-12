@@ -272,6 +272,7 @@ check_exit:
     eq
     jnz do_exit
 no_input:
+    drop               ; фикс утечки v0.11: снять stick-копию (dup) со стека
     push 100
     delay
     jmp main_loop
