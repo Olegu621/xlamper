@@ -1,79 +1,151 @@
-# C3 XLAMPER Apps
+<div align="center">
 
-Облачные плагины для **C3 XLAMPER** — карманного «флиппера» на ESP32-C3 Super Mini
-(OLED SSD1306 128x64, аналоговый стик, пьезо-спикер).
+# 🕹️ C3 XLAMPER — Apps
 
-## Как это работает
+**Облачный каталог игр и приложений для карманного «флиппера» на ESP32-C3**
 
-- В прошивке XLAMPER (v0.10+) работает **XLA VM** — стековый байт-код-интерпретатор
-  с доступом к экрану, стику, звуку и NVS (persistent storage).
-- Плагины — компактные `.xla` файлы (байт-код + данные + строки).
-- Меню устройства: секция **CLOUD → STORE** — каталог качает этот репозиторий,
-  выбранный плагин загружается по WiFi и сохраняется в SPIFFS (кэш).
-- Запуск: STORE → `R <имя>`. Плагин грузится в RAM, работает, при выходе память освобождается.
+[![Apps: 12](https://img.shields.io/badge/Apps-12-blue)](#каталог)
+[![XLA VM](https://img.shields.io/badge/VM-XLA%20bytecode-orange)](tools/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
-## Каталог (manifest.txt)
+*Snake · Tetris · 2048 · Pong · Slots · Mines · Wires · Spinner · Coin Flip · Root Bear*
 
-Формат: по строке на плагин — `file|Название` (file — без расширения):
+</div>
 
-```text
-pour|POUR - Root Bear proto
+---
+
+## 🎮 Как это работает
+
+**C3 XLAMPER** — открытая карманная консоль на ESP32-C3 Super Mini
+(OLED SSD1306 128×64, аналоговый стик, пьезо-спикер). Прошивка — тонкая
+оболочка: при старте она синхронизирует этот каталог по Wi-Fi, и **любая
+игра скачивается, запускается и удаляется** — на борту хранится только
+список. Хочешь новую игру? Просто добавь `.xla` в этот репозиторий —
+её увидят все консоли мира.
+
+```
+ ┌─────────┐   Wi-Fi    ┌──────────────┐   download → run → delete
+ │ XLAMPER │◄──────────►│  этот репо   │──►  RAM (без кэша!)
+ └─────────┘  manifest  └──────────────┘
 ```
 
-## Плагины
+- **Никакой установки**: приложение = один файл `.xla` (~1–2 КБ)
+- **Бесконечный каталог**: консоль хранит 0 байт игр
+- **Рекорды** — в NVS консоли, ключ `<TITLE>_best`
 
-| Плагин | Описание |
-| --- | --- |
-| **POUR** | Прототип Root Bear: медведь-бармен наливает root beer. Стик ←→ — наклон кувшина (скорость потока), клик — налив/подать кружку. |
-| **ROOTBEAR** | Полная игра: 4 клиента-зверя (мишка/зайка/котик/утка) заказывают кружку с целевым уровнем. Наклон ←→ + высота кувшина ↑↓ (пена), оценка PERFECT/GOOD/BAD, серия PERFECT-ов, рекорд в NVS. |
+## 📦 Каталог
 
-## Инструменты (папка tools)
+| Игра | Описание | Управление |
+| ------ | ---------- | ----------- |
+| **SNAKE** | Классика: поле 42×15, рост, ускорение, рекорд | стик, OK — рестарт |
+| **TETRIS** | Фигуры 2×2, линии, счёт | стик ←→↓, OK — поворот |
+| **2048** | Классика: слияния, счёт, рекорд | стик — ходы, OK — рестарт |
+| **PONG** | Против CPU, счёт до 5 | стик ←→ |
+| **SLOTS** | 3 барабана, честные частоты оригинала, 7 символов, джекпот 150 | OK — спин |
+| **MINES** | Сапёр 14×7, 10 мин, первый клик безопасен, флаги (hold OK) | стик, OK, hold OK |
+| **WIRES** | Соедини 4 провода: перестановка каждый раз | стик, OK |
+| **SPINNER** | Колесо фортуны, 24 позиции, честный стоп | OK — спин |
+| **COIN** | Монетка с анимацией | OK — бросок |
+| **ROOTBEAR** | Медведь-бармен: налей ровно до метки (авторская) | стик, OK |
+| **BUCKSHOT** | (авторская) | |
+| **POUR** | Прототип Root Bear (авторская) | стик, OK |
 
-- `xlas.py` — ассемблер: `.xlas` (текст) → `.xla` (байт-код)
-- `xla_sim.py` — симулятор VM на ПК (отладка без железа)
-- `xla_disasm.py` — дизассемблер `.xla`
+## 🛠 Инструменты (tools/)
 
-### Сборка плагина
+| Файл | Назначение |
+| ------ | ----------- |
+| `xlas.py` | Ассемблер: `.xlas` (текст) → `.xla` (байт-код) |
+| `xla_sim.py` | **Симулятор VM на ПК** — отладка без железа, ASCII-экран |
+| `xla_disasm.py` | Дизассемблер `.xla` |
+| `gen_opcodes.py` | Таблица опкодов из ЕДИНОГО источника (заголовок прошивки) |
+| `lint_xlas.py` | Проверка `.xlas` на неизвестные мнемоники |
+| `test_tools.py` | Roundtrip-тесты (13/13) |
+
+### Собрать и проверить игру без консоли
 
 ```bash
-python tools/xlas.py apps/pour.xlas apps/pour.xla
-python tools/xla_sim.py apps/pour.xla      # проверка
+python tools/xlas.py apps/snake.xlas apps/snake.xla   # ассемблировать
+python tools/lint_xlas.py apps/snake.xlas             # проверить
+python - <<'EOF'                                      # симулятор: 100 кадров
+from xla_sim import Sim
+from pathlib import Path
+sim = Sim(Path("apps/snake.xla").read_bytes())
+for i in range(100): sim.step(0)
+print(sim.stack)  # [] = чисто
+EOF
 ```
 
-## Формат .xla (v1)
+## ✍️ Написать свою игру (5 минут)
 
-```text
-[0..3]   magic "XLA1"
-[4]      version = 1
-[5]      flags
-[6..7]   codeSize (uint16 LE)
-[8..9]   dataSize (uint16 LE, чётное — int16-глобалы)
-[10..11] strSize (uint16 LE)
-[12..13] entry (uint16 LE)
-[14..15] titleLen (uint16 LE, 1..12)
-[16..17] (reserved)
-[18..]   title bytes
-[..]     code
-[..]     data
-[..]     strings (NUL-разделённые)
+`.xlas` — это стековый ассемблер. Смотри [`apps/coin.xlas`](apps/coin.xlas)
+(самая простая, ~60 строк) и [`apps/snake.xlas`](apps/snake.xlas) (полная игра).
+
+```asm
+.title MYGAME          ; имя в каталоге (1..12 симв)
+.data 32               ; 32 int16-глобалов
+.str s_hi HELLO        ; строка в пуле
+
+start:
+    push 0
+    gstore 0           ; g0 = счётчик
+
+main:
+    frame              ; конец кадра (60 fps)
+    event              ; событие со стека: 5=OK 6=EXIT
+    dup
+    push 6
+    eq
+    jnz quit
+    drop
+    cls
+    text 40 30 1 s_hi  ; вывести строку
+    gload 0
+    num 40 44 1        ; число
+    disp
+    jmp main
+
+quit:
+    drop
+    exit
 ```
 
-Опкоды: стековая машина, int16. Группы:
-`0x01` push/dup/drop/swap · `0x2x` арифметика · `0x3x` сравнения ·
-`0x45/0x46` gstore/gload · `0x5x` переходы/frame · `0x6x` графика (px/line/rect/circ/text…) ·
-`0x7x` sys (msec/rand/beep/exit/save/load) · `0x8x` ввод (stick/event/hold) ·
-`0x9x` math (sin/cos/sqrt, x1000 fixed).
+**Опкоды**: 69 шт., все — в [`src/xla_opcodes.h`](https://github.com/Olegu621/xlamper-firmware/blob/main/src/xla_opcodes.h)
+прошивки. Ключевые: `push/dup/drop/swap`, `add/sub/mul/div/mod`,
+`gstore/gload/gstorei/gloadi` (глобалы), `jmp/jz/jnz/call/ret`,
+`frame/event/stick/hold` (ввод), `cls/px/line/rect/frect/circ/text/num/disp`
+(экран), `beep/msec/rand/save/load` (прочее).
 
-События: 1 up, 2 down, 3 left, 4 right, 5 ok, 6 exit.
-Стик 8-way: -1 покой, 0 вверх, 2 вправо, 4 вниз, 6 влево, диагонали между.
+**Семантика (важно!)**:
 
-## Добавить свой плагин
+- `GSTOREI` берёт стек `[v, idx]` — **значение пушится первым, индекс верхним**
+- `RAND` берёт модуль со стека: `push 81; rand` → 0..80
+- `JZ/JNZ` всегда снимают условие
+- Графика берёт аргументы со стека: `rect 1 2 3 4 5` == 5 push + RECT
 
-1. Написать `apps/mygame.xlas` (пример — `apps/pour.xlas`)
-2. `python tools/xlas.py apps/mygame.xlas apps/mygame.xla`
-3. Проверить: `python tools/xla_sim.py apps/mygame.xla`
-4. Добавить строку в `manifest.txt`: `mygame|MY GAME`
-5. PR или коммит в main
+### Опубликовать
 
-Требования: код ≤ 20 КБ, data ≤ 4 КБ (int16-слоты ≤ 2048), строки ≤ 8 КБ,
-title 1–12 символов. Бюджет кадра 6000 опкодов (~60 fps).
+1. Форкни репозиторий
+2. `apps/mygame.xla` + `apps/mygame.xlas` (исходник обязателен)
+3. Строка в `manifest.txt`: `mygame|MYGAME|games`
+4. PR! После мержа игра появится на всех консолях при следующем RESYNC
+
+## 📡 Формат манифеста
+
+```
+файл|TITLE|категория
+snake|SNAKE|games
+```
+
+Категории: `games`, `media`, `tools`. Файл — без расширения,
+`.xla` добавляется прошивкой (`apps/<файл>.xla`).
+
+---
+
+<div align="center">
+
+**Прошивка**: [Olegu621/xlamper-firmware](https://github.com/Olegu621/xlamper-firmware) ·
+**Железо**: ESP32-C3 Super Mini + SSD1306 + стик + пьезо
+
+*Сделано с 💜 и 69 опкодами*
+
+</div>
