@@ -1,1 +1,5 @@
 rootbear|ROOTBEAR|games
+snake|SNAKE|games
+pong|PONG|games
+buckshot|BUCKSHOT|games
+pour|POUR|games
