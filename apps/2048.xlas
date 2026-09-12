@@ -1,0 +1,620 @@
+; ==================================================================
+;  2048.xlas — классика для XLA VM v0.12.
+;  Поле 4x4 в g[20..35] (0 = пусто), очки g40, best g41.
+;  Линии при сдвиге вытягиваются в g[50..53], сжимаются, сливаются.
+;  Стик 8-way = ход, OK = рестарт, EXIT = выход с сохранением.
+;  Плитки: рамка + толщина/заливка по рангу log2(v).
+; ==================================================================
+.title 2048
+.data 80
+; g0=lastT g3=dir g4=moved g5=best g9=line g10=i g11=dst g12=src
+; g13=p g14=i g15=j g20..35=field g40=score g41=won g50..53=line
+.str s_key best
+.str s_sc SCORE
+.str s_best BEST
+.str s_w 2048!
+
+; ============ точка входа ============
+start:
+    push 0
+    gstore 5
+    load s_key 0
+    gstore 5          ; best (default 0)
+    push 0
+    gstore 41         ; won=0
+    call new_tile
+    call new_tile
+    jmp main
+
+; ============ рестарт ============
+rst:
+    push 0
+    gstore 40         ; score=0
+    push 0
+    gstore 41         ; won=0
+    push 0
+    gstore 6
+clr:
+    gload 6
+    push 36
+    ge
+    jnz clr2
+    push 0
+    push 20
+    gload 6
+    add
+    gstorei
+    gload  6
+    push 1
+    add
+    gstore 6
+    jmp clr
+clr2:
+    call new_tile
+    call new_tile
+    jmp main
+
+; ============ главный цикл ============
+main:
+    frame
+    event
+    dup
+    push 6
+    eq
+    jnz ev_exit
+    dup
+    push 5
+    eq
+    jnz ev_ok
+    dup
+    push 3
+    eq
+    jnz ev_left
+    dup
+    push 4
+    eq
+    jnz ev_right
+    dup
+    push 1
+    eq
+    jnz ev_up
+    dup
+    push 2
+    eq
+    jnz ev_down
+    drop
+    jmp draw
+
+ev_left:
+    drop
+    push 0
+    gstore 3
+    call move
+    jmp draw
+ev_right:
+    drop
+    push 1
+    gstore 3
+    call move
+    jmp draw
+ev_up:
+    drop
+    push 2
+    gstore 3
+    call move
+    jmp draw
+ev_down:
+    drop
+    push 3
+    gstore 3
+    call move
+    jmp draw
+ev_ok:
+    drop
+    call save_best
+    jmp rst
+ev_exit:
+    drop
+    call save_best
+    exit
+
+; ============ ход (dir в g3) ============
+move:
+    push 0
+    gstore 4          ; moved=0
+    push 0
+    gstore 9          ; line=0
+mv_lines:
+    gload 9
+    push 4
+    ge
+    jnz mv_done
+    push 0
+    gstore 10
+mv_get:
+    gload 10
+    push 4
+    ge
+    jnz mv_slide
+    call cell_addr        ; addr поля-источника
+    gloadi               ; -> v  [v]
+    push 50
+    gload 10
+    add
+    gstorei            ; g[50+i] = v   ([v | 50+i])
+    gload 10
+    push 1
+    add
+    gstore 10
+    jmp mv_get
+mv_slide:
+    call slide
+    push 0
+    gstore 10
+mv_put:
+    gload 10
+    push 4
+    ge
+    jnz mv_next
+    push 50
+    gload 10
+    add
+    gloadi               ; v = g[50+i]
+    call cell_addr       ; addr поверх v
+    gstorei              ; field[addr] = v   [v | addr]
+    gload 10
+    push 1
+    add
+    gstore 10
+    jmp mv_put
+mv_next:
+    gload 9
+    push 1
+    add
+    gstore 9
+    jmp mv_lines
+mv_done:
+    gload 4
+    jnz mv_spawn
+    ret
+mv_spawn:
+    call new_tile
+    ret
+
+; ============ cell_addr: индекс клетки линии ============
+; Параметры в глобалах: g9=line, g10=i, g3=dir. Кладёт адрес на стек.
+; dir 0 (L): 20 + line*4 + i
+; dir 1 (R): 20 + line*4 + (3-i)
+; dir 2 (U): 20 + i*4 + line
+; dir 3 (D): 20 + (3-i)*4 + line
+cell_addr:
+    gload 3
+    push 1
+    eq
+    jnz ca_r
+    gload 3
+    push 2
+    eq
+    jnz ca_u
+    gload 3
+    push 3
+    eq
+    jnz ca_d
+    ; dir 0
+    push 20
+    gload 9
+    push 4
+    mul
+    add
+    gload 10
+    add
+    ret
+ca_r:
+    push 20
+    gload 9
+    push 4
+    mul
+    add
+    push 3
+    gload 10
+    sub
+    add
+    ret
+ca_u:
+    push 20
+    gload 10
+    push 4
+    mul
+    add
+    gload 9
+    add
+    ret
+ca_d:
+    push 20
+    push 3
+    gload 10
+    sub
+    push 4
+    mul
+    add
+    gload 9
+    add
+    ret
+
+; ============ slide: g[50..53] сжать+слить ============
+; фаза 1: компрессия нулей
+slide:
+    push 0
+    gstore 11         ; dst=0
+    push 0
+    gstore 12         ; src=0
+sl_comp:
+    gload 12
+    push 4
+    ge
+    jnz sl_fill
+    push 50
+    gload 12
+    add
+    gloadi
+    jnz sl_take
+    jmp sl_skip
+sl_take:
+    ; v = g[50+src]
+    push 50
+    gload 12
+    add
+    gloadi
+    ; addr = 50+dst (верхним)
+    push 50
+    gload 11
+    add
+    gstorei
+    gload 11
+    push 1
+    add
+    gstore 11
+sl_skip:
+    gload 12
+    push 1
+    add
+    gstore 12
+    jmp sl_comp
+; фаза 2: хвост = 0
+sl_fill:
+    gload 11
+    push 50
+    add
+    gstore 13
+sl_fill2:
+    gload 13
+    push 54
+    ge
+    jnz sl_merge
+    ; g[g13] = 0: v первым, addr верхним
+    push 0
+    gload 13
+    gstorei
+    gload 13
+    push 1
+    add
+    gstore 13
+    jmp sl_fill2
+; фаза 3: слияние пар
+sl_merge:
+    push 0
+    gstore 14
+sl_m:
+    gload 14
+    push 3
+    ge
+    jnz sl_done
+    push 50
+    gload 14
+    add
+    gloadi
+    jnz sl_v
+    jmp sl_next
+sl_v:
+    push 50
+    gload 14
+    push 1
+    add
+    add
+    gloadi
+    jnz sl_cmp
+    jmp sl_next
+sl_cmp:
+    push 50
+    gload 14
+    add
+    gloadi
+    push 50
+    gload 14
+    push 1
+    add
+    add
+    gloadi
+    eq
+    jnz sl_merge_pair
+    jmp sl_next
+sl_merge_pair:
+    ; score += v*2
+    gload 40
+    push 50
+    gload 14
+    add
+    gloadi
+    push 2
+    mul
+    add
+    gstore 40
+    ; g[50+i] *= 2: v первым, addr верхним
+    push 50
+    gload 14
+    add
+    dup
+    gloadi
+    push 2
+    mul
+    swap
+    gstorei
+    ; сдвиг хвоста
+    gload 14
+    push 1
+    add
+    gstore 15
+sl_shift:
+    gload 15
+    push 3
+    ge
+    jnz sl_shift_end
+    ; v = g[50+15+1] первым, addr = 50+15 верхним
+    push 50
+    gload 15
+    push 1
+    add
+    add
+    gloadi
+    push 50
+    gload 15
+    add
+    gstorei          ; g[50+15] = g[50+15+1]
+    gload 15
+    push 1
+    add
+    gstore 15
+    jmp sl_shift
+sl_shift_end:
+    ; g[53] = 0: v первым
+    push 0
+    push 53
+    gstorei
+    push 1
+    gstore 4          ; moved=1
+    jmp sl_next
+sl_next:
+    gload 14
+    push 1
+    add
+    gstore 14
+    jmp sl_m
+sl_done:
+    ret
+
+; ============ новая плитка ============
+new_tile:
+    push 0
+    gstore 11         ; count
+    push 0
+    gstore 12         ; i
+nt_scan:
+    gload 12
+    push 16
+    ge
+    jnz nt_pick
+    gload 12
+    push 20
+    add
+    gloadi
+    jnz nt_skip
+    ; пустая клетка: g[60+count] = i (v первым, addr верхним)
+    gload 12
+    gload 11
+    push 60
+    add
+    gstorei
+    gload 11
+    push 1
+    add
+    gstore 11
+nt_skip:
+    gload 12
+    push 1
+    add
+    gstore 12
+    jmp nt_scan
+nt_pick:
+    gload 11
+    jnz nt_go
+    ret
+nt_go:
+    gload 11
+    rand               ; 0..count-1
+    push 60
+    add
+    gloadi
+    gstore 12         ; выбранная клетка
+    push 10
+    rand               ; 0..9
+    jnz nt_four
+    push 2
+    push 20
+    gload 12
+    add
+    gstorei
+    ret
+nt_four:
+    push 4
+    push 20
+    gload 12
+    add
+    gstorei
+    ret
+
+; ============ рекорд ============
+save_best:
+    gload 40
+    gload 5
+    gt
+    jnz sb_go
+    ret
+sb_go:
+    gload 40
+    dup
+    gstore 5
+    save s_key
+    ret
+
+; ============ отрисовка ============
+draw:
+    cls
+    ; заголовок и очки вверху
+    text 2 8 1 s_sc
+    gload 40
+    num 52 8 1
+    text 86 8 1 s_best
+    gload 5
+    num 118 8 1
+    ; поле: 4x4 клетки по 25x13px, сетка 2px, начало (4,14)
+    push 0
+    gstore 9          ; r
+dr_r:
+    gload 9
+    push 4
+    ge
+    jnz dr_done
+    push 0
+    gstore 10
+dr_c:
+    gload 10
+    push 4
+    ge
+    jnz dr_r2
+    ; v = field[r][c] = g[20+r*4+c]
+    gload 9
+    push 4
+    mul
+    gload 10
+    add
+    push 20
+    add
+    gloadi
+    dup
+    jnz dr_v
+    drop               ; v==0: снять оба (dup + 0)
+    jmp dr_c2          ; пустая клетка — только рамка сетки
+dr_v:
+    ; v на стеке (dup сохранил). Рамка клетки: x=4+c*25, y=14+r*13, w=24, h=12
+    gstore 13          ; v -> g13
+    ; рамка
+    push 4
+    gload 10
+    push 25
+    mul
+    add
+    push 14
+    gload 9
+    push 13
+    mul
+    add
+    push 24
+    push 12
+    push 1
+    rect
+    ; log2 ранг: g11 = 0; v=g13; пока v>=2: v/=2, g11++
+    push 0
+    gstore 11
+lg:
+    gload 13
+    push 2
+    ge
+    jnz lg_step
+    jmp lg_end
+lg_step:
+    gload 13
+    push 2
+    div
+    gstore 13
+    gload 11
+    push 1
+    add
+    gstore 11
+    jmp lg
+lg_end:
+    ; затемнение по рангу: верхняя полоска внутри рамки (толщина по рангу)
+    gload 11
+    push 1
+    gt
+    jnz dr_shade
+    jmp dr_num
+dr_shade:
+    ; frect x+2 y+2 w-4 h-4*c внутри, c = цвет 1 (заливка ранга 2+):
+    ; рисуем внутреннюю заливку — «уровень» плитки растёт визуально
+    push 6
+    gload 10
+    push 25
+    mul
+    add
+    push 16
+    gload 9
+    push 13
+    mul
+    add
+    push 20
+    push 8
+    push 1
+    frect
+    ; — а поверх чистое место для числа: центр клетки
+    ; (число рисуется ниже на чистом поле)
+dr_num:
+    ; восстановить v = g[20+r*4+c]
+    gload 9
+    push 4
+    mul
+    gload 10
+    add
+    push 20
+    add
+    gloadi
+    ; num x y size: x = 8+c*25 (+сдвиг для больших чисел), y = 18+r*13
+    push 9
+    gload 10
+    push 25
+    mul
+    add
+    push 4
+    add
+    push 18
+    gload 9
+    push 13
+    mul
+    add
+    push 1
+    num
+dr_c2:
+    gload 10
+    push 1
+    add
+    gstore 10
+    jmp dr_c
+
+dr_r2:
+    gload 9
+    push 1
+    add
+    gstore 9
+    jmp dr_r
+dr_done:
+    disp
+    jmp main

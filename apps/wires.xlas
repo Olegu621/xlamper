@@ -1,0 +1,416 @@
+; ==================================================================
+;  wires.xlas — CONNECT WIRES для XLA VM v0.12 (порт zach-hutz/флиппер).
+;  Слева 4 терминала (источники), справа 4 (цели). Соединить каждый
+;  слева с правильным справа. Правильные пары = перестановка.
+;  Управление: стик вверх/вниз — выбор левого, вправо — выбрать правый,
+;  OK — соединить/проверить. EXIT — выход.
+;  Win: все 4 соединены верно. Ошибка — тост «WRONG».
+; ==================================================================
+.title WIRES
+.data 60
+; g0=curL g1=curR g2=phase(0=sel L,1=sel R) g3=connected(битмаска 0..15)
+; g4=won g5=tmp g6..9 = цель для L0..3 (perm), g10..13 = состояние L0..3 (-1 не соед)
+; g14=flashT g15=wrongFlag g16=lastT g17=i g18=j
+; правые клеммы: g20..23 = каким L соединён (или -1)
+.str s_key best
+.str s_w WIRED!
+.str s_wrong WRONG!
+.str s_sel SEL
+.str s_help UP-DN OK
+
+start:
+    load s_key 0
+    gstore 5
+    push 0
+    gstore 2          ; фаза 0 = выбор L
+    push 0
+    gstore 15         ; wrong-флаг сброшен
+    push 0
+    gstore 0
+    push 0
+    gstore 1
+    ; генерация перестановки: g[6+i] = i, потом тасование Фишера-Йетса
+    push 0
+    gstore 17
+perm_init:
+    gload 17
+    push 4
+    ge
+    jnz perm_shuf
+    gload 17
+    dup
+    push 6
+    add
+    gstorei             ; g[6+i] = i
+    gload 17
+    push 1
+    add
+    gstore 17
+    jmp perm_init
+perm_shuf:
+    push 3
+    gstore 17
+shuf:
+    gload 17
+    push 1
+    lt
+    jnz shuf_done
+    ; j = rand % (i+1)
+    gload 17
+    push 1
+    add
+    rand
+    gstore 18
+    ; tmp = g[6+i]: addr потребляется gloadi (без dup!)
+    push 6
+    gload 17
+    add
+    gloadi
+    gstore 19           ; tmp
+    push 6
+    gload 18
+    add
+    gloadi
+    push 6
+    gload 17
+    add
+    gstorei             ; g[6+i] = g[6+j]
+    gload 19
+    push 6
+    gload 18
+    add
+    gstorei             ; g[6+j] = tmp
+    gload 17
+    push 1
+    sub
+    gstore 17
+    jmp shuf
+shuf_done:
+    push -1
+    gstore 10
+    push -1
+    gstore 11
+    push -1
+    gstore 12
+    push -1
+    gstore 13
+    push -1
+    gstore 20
+    push -1
+    gstore 21
+    push -1
+    gstore 22
+    push -1
+    gstore 23
+    push 0
+    gstore 3
+    push 0
+    gstore 4
+    msec
+    gstore 16
+
+main:
+    frame
+    event
+    dup
+    push 6
+    eq
+    jnz do_exit
+    dup
+    push 5
+    eq
+    jnz do_ok
+    dup
+    push 1
+    eq
+    jnz ev_up
+    dup
+    push 2
+    eq
+    jnz ev_down
+    dup
+    push 4
+    eq
+    jnz ev_right
+    dup
+    push 3
+    eq
+    jnz ev_left
+    drop
+    jmp draw
+ev_up:
+    drop
+    ; phase 0: двигаем curL; phase 1: curR
+    gload 2
+    jnz up_r
+    gload 0
+    push 3
+    eq
+    jnz up_skip
+    gload 0
+    push 1
+    add
+    gstore 0
+    beep 900 15
+    jmp draw
+up_r:
+    gload 1
+    push 3
+    eq
+    jnz up_skip
+    gload 1
+    push 1
+    add
+    gstore 1
+    beep 900 15
+    jmp draw
+up_skip:
+    jmp draw
+ev_down:
+    drop
+    gload 2
+    jnz dn_r
+    gload 0
+    push 0
+    eq
+    jnz dn_skip
+    gload 0
+    push 1
+    sub
+    gstore 0
+    beep 900 15
+    jmp draw
+dn_r:
+    gload 1
+    push 0
+    eq
+    jnz dn_skip
+    gload 1
+    push 1
+    sub
+    gstore 1
+    beep 900 15
+    jmp draw
+dn_skip:
+    jmp draw
+ev_right:
+    drop
+    gload 2
+    jnz draw_ret
+    push 1
+    gstore 2
+    beep 1200 20
+    jmp draw
+draw_ret:
+    jmp draw
+ev_left:
+    drop
+    gload 2
+    jz draw_ret2
+    push 0
+    gstore 2
+    beep 600 20
+    jmp draw
+draw_ret2:
+    jmp draw
+
+; ---- OK: connect / win check ----
+do_ok:
+    drop
+    gload 4
+    jnz draw
+    ; фаза 0 -> фаза 1
+    gload 2
+    jnz ok_connect
+    push 1
+    gstore 2
+    jmp draw
+ok_connect:
+    ; L = g10..13 curL, R = curR: если g[6+curL] == curR -> верно
+    push 0
+    gstore 2          ; фаза назад
+    gload 0
+    push 10
+    add
+    gloadi
+    push -1
+    ne
+    jnz already
+    ; g[6+curL] == curR?
+    push 6
+    gload 0
+    add
+    gloadi
+    gload 1
+    eq
+    jnz connect_good
+    ; WRONG
+    beep 200 300
+    push 1
+    gstore 15
+    msec
+    gstore 14
+    jmp draw
+already:
+    beep 300 100
+    jmp draw
+ok_connect_ret:
+    jmp draw
+connect_good:
+    ; g[10+curL] = curR; g[20+curR] = curL
+    gload 1
+    gload 0
+    push 10
+    add
+    gstorei
+    gload 0
+    gload 1
+    push 20
+    add
+    gstorei
+    beep 1400 30
+    msec
+    gstore 14           ; время вспышки «верно»
+    ; connected count
+    gload 3
+    push 1
+    add
+    gstore 3
+    gload 3
+    push 4
+    eq
+    jnz win
+    jmp draw
+win:
+    push 1
+    gstore 4
+    beep 1800 60
+    msec
+    gstore 14
+    ; рекорд: нет счёта — просто сохранить факт (не используем)
+    jmp draw
+
+do_exit:
+    drop
+    exit
+
+; ============ отрисовка ============
+draw:
+    cls
+    ; заголовок
+    text 2 10 1 s_help
+    ; терминалы слева x=18, справа x=110, y = 18 + i*12
+    push 0
+    gstore 17
+dr_t:
+    gload 17
+    push 4
+    ge
+    jnz dr_wires
+    ; левая клемма: прямоугольник 10x8 на y=16+i*12
+    push 18
+    push 16
+    gload 17
+    push 12
+    mul
+    add
+    push 8
+    push 8
+    gload 2
+    push 0
+    eq
+    gload 0
+    gload 17
+    eq
+    and
+    jnz dr_lh
+    push 1
+    jmp dr_l
+dr_lh:
+    push 0
+dr_l:
+    rect
+    ; подсветка левого при фазе 0 (инверсная рамка поверх)
+    ; правая клемма x=102
+    push 102
+    push 16
+    gload 17
+    push 12
+    mul
+    add
+    push 8
+    push 8
+    push 1
+    rect
+    gload 17
+    push 1
+    add
+    gstore 17
+    jmp dr_t
+
+dr_wires:
+    ; провода: для каждого L соединённого с R — линия
+    push 0
+    gstore 17
+dr_w:
+    gload 17
+    push 4
+    ge
+    jnz dr_win
+    ; state = g[10+i]: читаем В ГЛОБАЛ (без dup-утечек)
+    push 10
+    gload 17
+    add
+    gloadi
+    gstore 19           ; state -> g19
+    gload 19
+    push -1
+    eq
+    jnz dr_w_next       ; -1: не соединён -> пропустить (state сохранён в g19)
+    ; LINE x1 y1 x2 y2 c: сначала y2 = 20+state*12
+    gload 19
+    push 12
+    mul
+    push 20
+    add             ; [y2]
+    push 26
+    push 20
+    gload 17
+    push 12
+    mul
+    add             ; [y2, x1, y1]
+    swap            ; [x1, y1, y2]
+    push 102        ; [x1, y1, y2, x2]
+    swap            ; [x1, y1, x2, y2]
+    push 1
+    line
+dr_w_next:
+    gload 17
+    push 1
+    add
+    gstore 17
+    jmp dr_w
+
+dr_win:
+    ; победа
+    gload 4
+    jz dr_wr
+    text 50 50 1 s_w
+dr_wr:
+    ; ошибка мигает 400мс
+    gload 15
+    jz dr_end
+    msec
+    gload 14
+    sub
+    push 400
+    lt
+    jnz dr_wrong_on
+    push 0
+    gstore 15
+    jmp dr_end
+dr_wrong_on:
+    text 46 50 1 s_wrong
+dr_end:
+    disp
+    jmp main

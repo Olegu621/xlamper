@@ -1,5 +1,12 @@
 rootbear|ROOTBEAR|games
 snake|SNAKE|games
+tetris|TETRIS|games
+2048|2048|games
 pong|PONG|games
+spinner|SPINNER|games
+slots|SLOTS|games
+mines|MINES|games
+coin|COIN|games
+wires|WIRES|games
 buckshot|BUCKSHOT|games
 pour|POUR|games

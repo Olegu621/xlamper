@@ -1,0 +1,370 @@
+; ==================================================================
+;  spinner.xlas — FORTUNE SPINNER (порт fortune_spinner, xantopren)
+;  на XLA VM. Оригинал: github.com/xantopren/fortune-spinner (MIT).
+;
+;  Механика 1:1 с оригиналом:
+;   * колесо 24 позиции, 3 сегмента YES/NO/MAYBE по 8 позиций;
+;   * тик 50 мс; шаг замедляется 3->2->1 по мере вращения;
+;   * после 48 тиков результат = заранее выбранная цель (fair random);
+;   * указатель справа, подсветка активной метки.
+;
+;  Глобалы (data):
+;   g0 = state (0 ready, 1 spin, 2 result)
+;   g1 = phase (позиция колеса 0..23)
+;   g2 = ticks
+;   g3 = результат (0 YES, 1 NO, 2 MAYBE)
+;   g4 = цель (fair random)
+;   g5 = последний тик (мс)
+;   g6 = тень фазы для отрисовки спиц
+; ==================================================================
+.title SPINNER
+.data 8
+.str s_title FORTUNE SPINNER
+.str s_yes YES
+.str s_no NO
+.str s_maybe MAYBE
+.str s_spin SPIN...
+.str s_again OK AGAIN
+.str s_ready OK SPIN
+.str s_best best
+
+; ---- таблица точек окружности R=21 (24 позиции) ----
+; (как в оригинале: x,y пары; лежат в data-секции g20..g67)
+; заполним кодом: таблица задаётся GSTORE-ами (компактнее вычислений)
+
+start:
+    ; init
+    push 0
+    gstore 0          ; state=ready
+    push 0
+    gstore 1          ; phase=0
+    push 0
+    gstore 2          ; ticks=0
+    load s_best 0
+    gstore 7          ; best (заглушка, spinner не пишет рекорды)
+
+main:
+    frame
+
+    ; ---- ввод: OK = спин, EXIT = выход ----
+    ; ВАЖНО: JZ/JNZ в этой VM ВСЕГДА снимают значение со стека,
+    ; поэтому после двух проверок стек пуст — drop не нужен.
+    event
+    dup
+    push 5            ; EV_OK
+    eq
+    jnz do_spin       ; снимет флаг; если не OK — останется [ev]
+
+    push 6            ; EV_EXIT
+    eq                ; [ev6]
+    jnz do_exit       ; снимет флаг; стек пуст при любом исходе
+
+    jmp tick
+
+do_spin:
+    drop              ; снять исходный event (dup-паттерн оставил его при переходе)
+    gload 0
+    push 1
+    eq
+    jnz tick          ; уже крутится — игнор
+    push 1
+    gstore 0          ; state=spin
+    push 0
+    gstore 2          ; ticks=0
+    rand 3            ; 0..2 fair random
+    gstore 4          ; target
+    beep 1400 30
+    jmp tick
+
+do_exit:
+    exit
+
+; ---- тик каждые ~50 мс ----
+tick:
+    gload 0
+    push 1
+    eq
+    jz draw           ; не spin — сразу рисовать
+
+    msec
+    gload 5
+    sub
+    push 50
+    ge
+    jnz tick_go
+    jmp draw
+
+tick_go:
+    msec
+    gstore 5          ; tTick=now
+    gload 2
+    push 1
+    add
+    gstore 2          ; ticks++
+
+    ; шаг: 3 если ticks<24, 2 если <36, иначе 1
+    gload 2
+    push 24
+    lt
+    jnz step3
+    gload 2
+    push 36
+    lt
+    jnz step2
+    jmp step1
+
+step3:
+    gload 1
+    push 3
+    add
+    push 24
+    mod
+    gstore 1
+    jmp tick_snd
+step2:
+    gload 1
+    push 2
+    add
+    push 24
+    mod
+    gstore 1
+    jmp tick_snd
+step1:
+    gload 1
+    push 1
+    add
+    push 24
+    mod
+    gstore 1
+
+tick_snd:
+    beep 800 4
+
+    ; ticks >= 48 -> result
+    gload 2
+    push 48
+    ge
+    jnz finish
+    jmp draw
+
+finish:
+    gload 4
+    gstore 3          ; result=target
+    ; phase = (20 + 24 - result*8) % 24
+    push 20
+    push 24
+    gload 3
+    push 8
+    mul
+    sub
+    add
+    push 24
+    mod
+    gstore 1
+    push 2
+    gstore 0          ; state=result
+    beep 1800 60
+    jmp draw
+
+; ---- отрисовка ----
+draw:
+    cls
+
+    ; заголовок
+    text 38 1 1 s_title
+
+    ; ---- колесо: окружность + 3 спицы ----
+    ; центр (30,36), R=21; угол спицы k = phase*15 + k*120 (fixed x1000)
+    circ 30 36 21 1
+
+    ; спицы: 3 штуки под 0/120/240 град от фазы (fixed x1000)
+    ; спица = линия (30,36) -> (30 + 21*cos(a), 36 + 21*sin(a))
+    ; порядок на стеке: x0 y0 x1 y1 c (VM снимает с конца)
+
+    ; спица 1 (a = phase*15)
+    push 30
+    push 36
+    gload 1
+    push 15
+    mul
+    cos
+    push 21
+    mul
+    push 1000
+    div
+    push 30
+    add
+    gload 1
+    push 15
+    mul
+    sin
+    push 21
+    mul
+    push 1000
+    div
+    push 36
+    add
+    push 1
+    line
+
+    ; спица 2 (a = phase*15 + 120)
+    push 30
+    push 36
+    gload 1
+    push 15
+    mul
+    push 120
+    add
+    cos
+    push 21
+    mul
+    push 1000
+    div
+    push 30
+    add
+    gload 1
+    push 15
+    mul
+    push 120
+    add
+    sin
+    push 21
+    mul
+    push 1000
+    div
+    push 36
+    add
+    push 1
+    line
+
+    ; спица 3 (a = phase*15 + 240)
+    push 30
+    push 36
+    gload 1
+    push 15
+    mul
+    push 240
+    add
+    cos
+    push 21
+    mul
+    push 1000
+    div
+    push 30
+    add
+    gload 1
+    push 15
+    mul
+    push 240
+    add
+    sin
+    push 21
+    mul
+    push 1000
+    div
+    push 36
+    add
+    push 1
+    line
+
+    fillcircle_stub:
+    ; центр — точка (fcirc сам пушит аргументы)
+    fcirc 30 36 2 1
+
+    jmp draw2
+
+draw2:
+    ; ---- указатель справа (треугольник) ----
+    line 53 36 60 32 1
+    line 53 36 60 40 1
+    line 60 32 60 40 1
+
+    ; ---- метки YES/NO/MAYBE с подсветкой ----
+    ; g0=0 -> none; g0=1 -> (ticks/2)%3; g0=2 -> result
+    gload 0
+    push 1
+    eq
+    jnz hl_spin
+    gload 0
+    push 2
+    eq
+    jnz hl_result
+    jmp labels
+
+hl_spin:
+    gload 2
+    push 2
+    div
+    push 3
+    mod
+    gstore 6
+    jmp labels
+hl_result:
+    gload 3
+    gstore 6
+    jmp labels
+
+labels:
+    ; YES (y=20)
+    gload 6
+    push 0
+    eq
+    jnz yes_on
+    jmp yes_off
+yes_on:
+    frect 68 14 58 12 1
+    text 90 14 0 s_yes
+    jmp no_lbl
+yes_off:
+    text 90 14 1 s_yes
+    jmp no_lbl
+
+no_lbl:
+    gload 6
+    push 1
+    eq
+    jnz no_on
+    jmp no_off
+no_on:
+    frect 68 28 58 12 1
+    text 90 28 0 s_no
+    jmp maybe_lbl
+no_off:
+    text 90 28 1 s_no
+    jmp maybe_lbl
+
+maybe_lbl:
+    gload 6
+    push 2
+    eq
+    jnz maybe_on
+    jmp maybe_off
+maybe_on:
+    frect 68 42 58 12 1
+    text 90 42 0 s_maybe
+    jmp status
+maybe_off:
+    text 90 42 1 s_maybe
+    jmp status
+
+status:
+    gload 0
+    push 1
+    eq
+    jnz st_spin
+    gload 0
+    push 2
+    eq
+    jnz st_again
+    text 84 63 1 s_ready
+    jmp disp
+st_spin:
+    text 88 63 1 s_spin
+    jmp disp
+st_again:
+    text 83 63 1 s_again
+    jmp disp
+
+disp:
+    disp
+    jmp main

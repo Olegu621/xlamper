@@ -1,0 +1,674 @@
+; ==================================================================
+;  mines.xlas — MINESWEEPER (порт panki27, GPL-3.0) для XLA VM.
+;  Поле 14x5 (клетки 8px + заголовок), 10 мин.
+;  Управление: стик = курсор, OK = открыть, HOLD(>=90) = флаг.
+;  Первый клик безопасен. Числа, каскад, флаги, победа/поражение.
+; ==================================================================
+.title MINES
+.data 190
+; поле: g[20..89] = 70 клеток (14x5); мины: g[100..169] (0/1)
+; temps: g[180..189] (ВНЕ обеих карт!)
+; g0=cx g1=cy g2=started g3=flags g4=cleared g5=state(0 игра,1 бойм,2 вайн) g6=tmr
+; temps: g180=i g181=hint g182=x g183=y g184=cell g185=px g186=py
+
+.str s_m M:
+.str s_win WIN!
+.str s_boom BOOM!
+.str s_key best
+
+start:
+    push 6
+    gstore 0          ; cx=6
+    push 2
+    gstore 1          ; cy=2
+    push 0
+    gstore 2          ; started=0
+    push 0
+    gstore 3
+    push 0
+    gstore 4
+    push 0
+    gstore 5
+    msec
+    gstore 6
+    ; поле: все клетки ЗАКРЫТЫ (9), мины 0
+    push 0
+    gstore 180
+init_loop:
+    gload 180
+    push 70
+    ge
+    jnz init_done
+    push 9
+    push 20
+    gload 180
+    add
+    gstorei
+    push 0
+    push 100
+    gload 180
+    add
+    gstorei
+    gload 180
+    push 1
+    add
+    gstore 180
+    jmp init_loop
+init_done:
+
+main:
+    frame
+
+    ; ---- выход ----
+    event
+    dup
+    push 6
+    eq
+    jnz do_exit
+    drop
+
+    ; ---- рестарт ----
+    gload 5
+    push 0
+    eq
+    jnz play_input
+    ; игра окончена: OK = рестарт
+    event
+    dup
+    push 5
+    eq
+    jnz do_restart
+    drop
+    jmp draw
+
+play_input:
+    ; ---- курсор ----
+    event
+    dup
+    push 1
+    eq
+    jnz mv_up
+    dup
+    push 2
+    eq
+    jnz mv_dn
+    dup
+    push 3
+    eq
+    jnz mv_lf
+    dup
+    push 4
+    eq
+    jnz mv_rt
+    drop
+
+    ; ---- флаг по hold ----
+    hold
+    push 90
+    ge
+    gload 5
+    push 0
+    eq
+    and
+    jnz toggle_flag
+    jmp open_chk
+
+toggle_flag:
+    gload 0
+    gload 1
+    push 14
+    mul
+    add
+    push 20
+    add
+    gloadi            ; клетка (адрес = 20 + cy*14 + cx)
+    dup
+    push 9
+    eq
+    jnz tf_set
+    dup
+    push 10
+    eq
+    jnz tf_unset
+    drop
+    jmp open_chk
+tf_set:
+    drop
+    push 10
+    push 20
+    gload 1
+    push 14
+    mul
+    add
+    gload 0
+    add
+    gstorei
+    gload 3
+    push 1
+    add
+    gstore 3
+    beep 1000 20
+    jmp open_chk
+tf_unset:
+    drop
+    push 9
+    push 20
+    gload 1
+    push 14
+    mul
+    add
+    gload 0
+    add
+    gstorei
+    gload 3
+    push 1
+    sub
+    gstore 3
+    beep 700 20
+    jmp open_chk
+
+open_chk:
+    ; ---- OK = открыть ----
+    event
+    dup
+    push 5
+    eq
+    gload 5
+    push 0
+    eq
+    and
+    jnz do_open
+    drop
+    jmp draw
+
+mv_up:
+    drop
+    gload 1
+    push 0
+    gt
+    jnz mv_up2
+    jmp input_end
+mv_up2:
+    gload 1
+    push 1
+    sub
+    gstore 1
+    beep 900 8
+    jmp input_end
+mv_dn:
+    drop
+    gload 1
+    push 4
+    lt
+    jnz mv_dn2
+    jmp input_end
+mv_dn2:
+    gload 1
+    push 1
+    add
+    gstore 1
+    beep 900 8
+    jmp input_end
+mv_lf:
+    drop
+    gload 0
+    push 0
+    gt
+    jnz mv_lf2
+    jmp input_end
+mv_lf2:
+    gload 0
+    push 1
+    sub
+    gstore 0
+    beep 900 8
+    jmp input_end
+mv_rt:
+    drop
+    gload 0
+    push 13
+    lt
+    jnz mv_rt2
+    jmp input_end
+mv_rt2:
+    gload 0
+    push 1
+    add
+    gstore 0
+    beep 900 8
+    jmp input_end
+
+input_end:
+    jmp draw
+
+; ---- открытие клетки ----
+do_open:
+    drop              ; ev
+    gload 2
+    push 0
+    eq
+    jnz first_setup
+    jmp open_cell
+
+first_setup:
+    push 1
+    gstore 2          ; started=1
+    msec
+    gstore 6
+    ; расстановка 10 мин (не под курсором)
+    push 0
+    gstore 180         ; i мин
+fs_loop:
+    gload 180
+    push 10
+    ge
+    jnz fs_done
+    push 14
+    rand
+    gstore 182         ; rx
+    push 5
+    rand
+    gstore 183         ; ry
+    ; пропустить если уже мина ИЛИ под курсором
+    push 100
+    gload 183
+    push 14
+    mul
+    add
+    gload 182
+    add
+    gloadi
+    push 1
+    eq
+    jnz fs_loop
+    gload 182
+    gload 0
+    eq
+    gload 183
+    gload 1
+    eq
+    and
+    jnz fs_loop
+    push 1
+    push 100
+    gload 183
+    push 14
+    mul
+    add
+    gload 182
+    add
+    gstorei          ; мина[ry][rx]=1
+    gload 180
+    push 1
+    add
+    gstore 180
+    jmp fs_loop
+fs_done:
+
+open_cell:
+    ; закрыта ли? (адрес = 20 + cy*14 + cx)
+    push 20
+    gload 1
+    push 14
+    mul
+    add
+    gload 0
+    add
+    gloadi
+    push 9
+    eq
+    jnz oc_go
+    jmp draw
+oc_go:
+    ; мина?
+    push 100
+    gload 1
+    push 14
+    mul
+    add
+    gload 0
+    add
+    gloadi
+    push 1
+    eq
+    jnz oc_boom
+    ; открыть: посчитать мины вокруг
+    push 0
+    gstore 181         ; hint=0
+    push -1
+    gstore 182         ; dy=-1
+oc_dy:
+    gload 182
+    push 2
+    gt
+    jnz oc_cnt_done
+    push -1
+    gstore 183         ; dx=-1
+oc_dx:
+    gload 183
+    push 2
+    gt
+    jnz oc_dx_end
+    ; пропустить саму клетку (dy==0 && dx==0) — без утечки стека:
+    gload 182
+    jnz oc_not_self
+    gload 183
+    jnz oc_not_self
+    jmp oc_skip
+oc_not_self:
+    ; сосед в поле?
+    gload 0
+    gload 183
+    add
+    push 0
+    ge
+    gload 0
+    gload 183
+    add
+    push 13
+    le
+    and
+    gload 1
+    gload 182
+    add
+    push 0
+    ge
+    and
+    gload 1
+    gload 182
+    add
+    push 4
+    le
+    and
+    jnz oc_in
+    jmp oc_skip
+oc_in:
+    ; мина у соседа?
+    push 100
+    gload 1
+    gload 182
+    add
+    push 14
+    mul
+    add
+    gload 0
+    gload 183
+    add
+    add
+    gloadi
+    push 1
+    eq
+    jnz oc_hint_inc
+    jmp oc_skip
+oc_hint_inc:
+    gload 181
+    push 1
+    add
+    gstore 181
+oc_skip:
+    gload 183
+    push 1
+    add
+    gstore 183
+    jmp oc_dx
+oc_dx_end:
+    gload 182
+    push 1
+    add
+    gstore 182
+    jmp oc_dy
+
+oc_cnt_done:
+    ; клетка = hint (0..8)
+    gload 181
+    push 20
+    gload 1
+    push 14
+    mul
+    add
+    gload 0
+    add
+    gstorei
+    gload 4
+    push 1
+    add
+    gstore 4          ; cleared++
+    beep 1300 10
+    ; победа? cleared == 70-10=60
+    gload 4
+    push 60
+    eq
+    jnz do_win
+    jmp draw
+
+oc_boom:
+    ; показать мину
+    push 11
+    push 20
+    gload 1
+    push 14
+    mul
+    add
+    gload 0
+    add
+    gstorei
+    push 1
+    gstore 5          ; state=boom
+    beep 200 300
+    jmp draw
+
+do_win:
+    push 2
+    gstore 5
+    beep 1600 60
+    beep 2000 80
+    jmp draw
+
+do_restart:
+    drop
+    push 0
+    gstore 2
+    push 0
+    gstore 3
+    push 0
+    gstore 4
+    push 0
+    gstore 5
+    ; очистить карты (GCPY из пустой зоны? нет такой — цикл)
+    push 0
+    gstore 180
+rst_loop:
+    gload 180
+    push 70
+    ge
+    jnz rst_done
+    push 9
+    push 20
+    gload 180
+    add
+    gstorei
+    push 0
+    push 100
+    gload 180
+    add
+    gstorei
+    gload 180
+    push 1
+    add
+    gstore 180
+    jmp rst_loop
+rst_done:
+    jmp main
+
+do_exit:
+    gload 5
+    push 2
+    eq
+    jnz exit_s
+    exit
+exit_s:
+    msec
+    gload 6
+    sub
+    push 1000
+    div
+    save s_key
+    exit
+
+; ---- отрисовка ----
+draw:
+    cls
+    ; заголовок: мины
+    text 0 1 1 s_m
+    push 10
+    gload 3
+    sub
+    num 10 1 1
+    ; таймер
+    msec
+    gload 6
+    sub
+    push 1000
+    div
+    num 96 1 1
+
+    ; поле 14x5, клетка 8px, с y=10
+    push 0
+    gstore 180         ; i=0 (клетки 0..69)
+dr_loop:
+    gload 180
+    push 70
+    ge
+    jnz dr_done
+    ; клетка i: x=i%14, y=i/14
+    gload 180
+    push 14
+    mod
+    gstore 182
+    gload 180
+    push 14
+    div
+    gstore 183
+    ; состояние клетки
+    push 20
+    gload 180
+    add
+    gloadi
+    gstore 184
+    ; координаты пикселей
+    gload 182
+    push 8
+    mul
+    gstore 185
+    gload 183
+    push 8
+    mul
+    push 10
+    add
+    gstore 186
+    ; рисуем по состоянию
+    gload 184
+    push 9
+    eq
+    jnz dr_closed
+    gload 184
+    push 10
+    eq
+    jnz dr_flag
+    gload 184
+    push 11
+    eq
+    jnz dr_mine
+    gload 184
+    push 0
+    eq
+    jnz dr_open_empty
+    ; число
+    gload 184
+    gload 185
+    push 2
+    add
+    gload 186
+    push 2
+    add
+    push 1
+    num
+    jmp dr_next
+dr_closed:
+    gload 185
+    gload 186
+    push 7
+    push 7
+    push 1
+    rect
+    jmp dr_next
+dr_flag:
+    gload 185
+    gload 186
+    push 7
+    push 7
+    push 1
+    frect
+    jmp dr_next
+dr_mine:
+    gload 185
+    push 4
+    add
+    gload 186
+    push 4
+    add
+    push 3
+    push 1
+    fcirc
+    jmp dr_next
+dr_open_empty:
+    ; ничего (открытая пустая)
+    jmp dr_next
+
+dr_next:
+    ; курсор
+    gload 182
+    gload 0
+    eq
+    gload 183
+    gload 1
+    eq
+    and
+    jnz dr_cur
+    jmp dr_adv
+dr_cur:
+    gload 185
+    gload 186
+    push 7
+    push 7
+    push 1
+    rect
+    jmp dr_adv
+
+dr_adv:
+    gload 180
+    push 1
+    add
+    gstore 180
+    jmp dr_loop
+
+dr_done:
+    ; сообщение о конце
+    gload 5
+    push 0
+    eq
+    jnz dr_disp
+    text 40 30 1 s_boom
+    jmp dr_disp2
+dr_disp:
+    gload 5
+    push 2
+    eq
+    jnz dr_win
+    jmp dr_disp2
+dr_win:
+    text 46 30 1 s_win
+
+dr_disp2:
+    disp
+    jmp main

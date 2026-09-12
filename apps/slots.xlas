@@ -1,0 +1,447 @@
+; ==================================================================
+;  slots.xlas — SLOTS для XLA VM v0.12 (порт xyz_vh8t_slots).
+;  3 барабана, символы 0..6: 0=777 1=BAR 2=BELL 3=CHERRY 4=LEMON
+;                          5=ORNG 6=PLUM (рисуются большими цифрами).
+;  Частоты оригинала (81 способов): SEVEN2 BAR6 BELL7 CHER10 LEM13 ORG18 PLUM25.
+;  Выплаты оригинала: 777=150 BAR=75 BELL=50 CHER=25 LEM=15 ORG=10 PLUM=5;
+;                     2 cherry=5; 1 cherry=2.
+;  Ставка 1, старт 20 кредитов, рекорд в NVS. OK=спин, EXIT=выход.
+; ==================================================================
+.title SLOTS
+.data 40
+; g0=credits g1=best g2..4=r1..r3(итог) g5=phase(0 idle,1 spin)
+; g6=spinT g8..10=цели g11..13=длительности g14=pay g15=tmp
+; g17..19 = видимые символы
+.str s_key best
+.str s_cr CR
+.str s_hi HI
+.str s_win WIN
+.str s_spin ...
+
+; ============ старт ============
+start:
+    load s_key 0
+    gstore 1
+    push 20
+    gstore 0
+    push 0
+    gstore 5
+    push 0
+    gstore 2
+    push 3
+    gstore 3
+    push 6
+    gstore 4
+    msec
+    gstore 6
+
+main:
+    frame
+    event
+    dup
+    push 6
+    eq
+    jnz do_exit
+    dup
+    push 5
+    eq
+    jnz do_ok
+    drop
+    jmp draw
+
+do_ok:
+    drop
+    gload 5
+    jnz draw          ; уже вращается
+    gload 0
+    push 1
+    lt
+    jnz no_money
+    gload 0
+    push 1
+    sub
+    gstore 0
+    push 81
+    rand
+    call sym_by_freq
+    gstore 8
+    push 81
+    rand
+    call sym_by_freq
+    gstore 9
+    push 81
+    rand
+    call sym_by_freq
+    gstore 10
+    msec
+    gstore 6
+    push 900
+    gstore 11
+    push 1200
+    gstore 12
+    push 1500
+    gstore 13
+    push 1
+    gstore 5
+    beep 600 30
+    jmp draw
+no_money:
+    beep 200 200
+    jmp draw
+
+do_exit:
+    drop
+    exit
+
+; ---- тик вращения: msec-spinT >= dur -> фиксация барабана ----
+spin_tick:
+    msec
+    gload 6
+    sub
+    gload 11
+    ge
+    jnz st1_fix
+    jmp st1_run
+st1_fix:
+    gload 8
+    gstore 2
+    beep 900 15
+st1_run:
+    msec
+    gload 6
+    sub
+    gload 12
+    ge
+    jnz st2_fix
+    jmp st2_run
+st2_fix:
+    gload 9
+    gstore 3
+    beep 1000 15
+st2_run:
+    msec
+    gload 6
+    sub
+    gload 13
+    ge
+    jnz st3_fix
+    ret
+st3_fix:
+    gload 10
+    gstore 4
+    beep 1100 15
+    push 0
+    gstore 5
+    call eval_win
+    ret
+
+; ---- видимые символы (пока крутится — случайные) ----
+spin_visual:
+    msec
+    gload 6
+    sub
+    gload 11
+    lt
+    jnz sv1
+    gload 2
+    gstore 17
+    jmp sv2
+sv1:
+    push 7
+    rand
+    gstore 17
+sv2:
+    msec
+    gload 6
+    sub
+    gload 12
+    lt
+    jnz sv2x
+    gload 3
+    gstore 18
+    jmp sv3
+sv2x:
+    push 7
+    rand
+    gstore 18
+sv3:
+    msec
+    gload 6
+    sub
+    gload 13
+    lt
+    jnz sv3x
+    gload 4
+    gstore 19
+    ret
+sv3x:
+    push 7
+    rand
+    gstore 19
+    ret
+
+; ============ оценка ============
+eval_win:
+    push 0
+    gstore 14
+    ; тройка?
+    gload 2
+    gload 3
+    eq
+    gload 3
+    gload 4
+    eq
+    and
+    jnz triple
+    ; пара cherry (3)
+    gload 2
+    push 3
+    eq
+    gload 3
+    push 3
+    eq
+    and
+    jnz pair_ch
+    gload 2
+    push 3
+    eq
+    gload 4
+    push 3
+    eq
+    and
+    jnz pair_ch
+    gload 3
+    push 3
+    eq
+    gload 4
+    push 3
+    eq
+    and
+    jnz pair_ch
+    ; одна cherry
+    gload 2
+    push 3
+    eq
+    jnz one_ch
+    gload 3
+    push 3
+    eq
+    jnz one_ch
+    gload 4
+    push 3
+    eq
+    jnz one_ch
+    jmp ev_beep_lose
+pair_ch:
+    push 5
+    gstore 14
+    jmp ev_add
+one_ch:
+    push 2
+    gstore 14
+    jmp ev_add
+triple:
+    gload 2
+    push 0
+    eq
+    jnz tr777
+    gload 2
+    push 1
+    eq
+    jnz trbar
+    gload 2
+    push 2
+    eq
+    jnz trbell
+    gload 2
+    push 3
+    eq
+    jnz trch
+    gload 2
+    push 4
+    eq
+    jnz trlem
+    gload 2
+    push 5
+    eq
+    jnz trorg
+    push 5
+    gstore 14
+    jmp ev_add
+tr777:
+    push 150
+    gstore 14
+    beep 2200 200
+    jmp ev_add
+trbar:
+    push 75
+    gstore 14
+    jmp ev_add
+trbell:
+    push 50
+    gstore 14
+    jmp ev_add
+trch:
+    push 25
+    gstore 14
+    jmp ev_add
+trlem:
+    push 15
+    gstore 14
+    jmp ev_add
+trorg:
+    push 10
+    gstore 14
+    jmp ev_add
+ev_add:
+    gload 14
+    jz ev_beep_lose
+    gload 0
+    gload 14
+    add
+    gstore 0
+    gload 0
+    gload 1
+    gt
+    jnz ev_hi
+    jmp ev_beep_win
+ev_hi:
+    gload 0
+    dup
+    gstore 1
+    save s_key
+    jmp ev_beep_win
+ev_beep_win:
+    beep 1500 60
+    ret
+ev_beep_lose:
+    beep 300 60
+    ret
+
+; ============ символ по частоте: x(0..80) на стеке -> 0..6 ============
+sym_by_freq:
+    dup
+    push 2
+    lt
+    jnz sf7
+    dup
+    push 8
+    lt
+    jnz sfbar
+    dup
+    push 15
+    lt
+    jnz sfbell
+    dup
+    push 25
+    lt
+    jnz sfch
+    dup
+    push 38
+    lt
+    jnz sflem
+    dup
+    push 56
+    lt
+    jnz sforg
+    drop
+    push 6
+    ret
+sf7:
+    drop
+    push 0
+    ret
+sfbar:
+    drop
+    push 1
+    ret
+sfbell:
+    drop
+    push 2
+    ret
+sfch:
+    drop
+    push 3
+    ret
+sflem:
+    drop
+    push 4
+    ret
+sforg:
+    drop
+    push 5
+    ret
+
+; ============ отрисовка ============
+draw:
+    cls
+    gload 5
+    jz d_idle
+    call spin_tick
+    call spin_visual
+    jmp d_reels
+d_idle:
+    gload 2
+    gstore 17
+    gload 3
+    gstore 18
+    gload 4
+    gstore 19
+d_reels:
+    ; 3 рамки
+    push 4
+    push 12
+    push 36
+    push 34
+    push 1
+    rect
+    push 46
+    push 12
+    push 36
+    push 34
+    push 1
+    rect
+    push 88
+    push 12
+    push 36
+    push 34
+    push 1
+    rect
+    ; символы БОЛЬШИМИ цифрами (шрифт size 3): num x y size
+    gload 17
+    push 14
+    push 34
+    push 3
+    num
+    gload 18
+    push 56
+    push 34
+    push 3
+    num
+    gload 19
+    push 98
+    push 34
+    push 3
+    num
+    ; статус
+    gload 5
+    jz d_st
+    text 52 2 1 s_spin
+    jmp d_cr
+d_st:
+    gload 14
+    jnz d_w
+    text 44 2 1 s_cr
+    jmp d_cr
+d_w:
+    text 56 2 1 s_win
+d_cr:
+    ; низ: кредиты + рекорд
+    text 2 52 1 s_cr
+    gload 0
+    num 30 52 1
+    text 70 52 1 s_hi
+    gload 1
+    num 94 52 1
+    disp
+    jmp main

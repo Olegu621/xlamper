@@ -1,0 +1,191 @@
+; ==================================================================
+;  coin.xlas — COIN FLIP (порт zach-hutz) для XLA VM v0.12.
+;  OK = подброс (800 мс анимация), HEADS/TAILS, счётчики.
+;  Монета: сжатие по X (эллипс), ребро, разворот.
+; ==================================================================
+.title COIN
+.data 8
+; g0=state (0 готов, 1 крутится) g1=result g2=flipStart g3=heads g4=tails
+; g5=drawT
+.str s_head COIN FLIPPER!
+.str s_flip FLIPPING...
+.str s_heads HEADS
+.str s_tails TAILS
+.str s_key best
+
+start:
+    push 0
+    gstore 0
+    push 0
+    gstore 1
+    push 0
+    gstore 3
+    push 0
+    gstore 4
+
+main:
+    frame
+
+    ; ВВОД: event / dup / push X / eq / jnz — при НЕсрабатывании
+    ; остаётся [ev]; каждый jnz снимает только свой флаг.
+    event
+    dup
+    push 6
+    eq
+    jnz do_exit      ; снимет флаг; [ev] останется (в do_exit — выход, неважно)
+    ; не exit: [ev] — вторая проверка на копии
+    dup
+    push 5
+    eq
+    jnz flip_cond    ; снимет флаг; [ev] остался
+    drop             ; не flip: снять ev -> пусто
+    jmp anim_check
+
+flip_cond:
+    ; [ev] на стеке; проверка state без потери ev
+    gload 0
+    push 0
+    eq               ; [ev, cond]
+    jnz do_flip      ; снимет cond; [ev] останется — do_flip снимет
+    drop             ; cond=false: снять
+    drop             ; снять ev
+    jmp anim_check
+
+anim_check:
+    ; проверка конца ТОЛЬКО когда крутится (state==1)
+    gload 0
+    push 1
+    eq
+    jnz anim_chk2
+    jmp draw
+anim_chk2:
+    msec
+    gload 2
+    sub
+    push 800
+    ge
+    jnz anim_end
+    jmp draw
+
+anim_end:
+    push 0
+    gstore 0
+    gload 1
+    jz cnt_heads
+    gload 4
+    push 1
+    add
+    gstore 4
+    jmp draw
+cnt_heads:
+    gload 3
+    push 1
+    add
+    gstore 3
+    jmp draw
+
+do_flip:
+    drop             ; снять ev (dup-паттерн оставил его)
+    push 1
+    gstore 0
+    rand 2
+    gstore 1
+    msec
+    gstore 2
+    beep 1000 30
+    jmp draw
+
+do_exit:
+    exit
+
+draw:
+    cls
+    text 28 2 1 s_head
+
+    ; монета: центр (64,34), ry=14
+    gload 0
+    push 1
+    eq
+    jnz coin_anim
+    ; покой: полная монета (орёл/решка)
+    gload 1
+    jz coin_t
+    ; TAILS: круг с крестом
+    fcirc 64 34 14 1
+    line 58 28 70 40 1
+    line 58 40 70 28 1
+    jmp coin_lbl
+coin_t:
+    fcirc 64 34 14 1
+    frect 58 26 12 16 0
+    frect 72 26 0 16 0
+    jmp coin_lbl
+
+coin_anim:
+    ; сжатие по X: t=(msec-flipStart)%400; rx=|16-t*32/400|
+    msec
+    gload 2
+    sub
+    push 400
+    mod
+    push 32
+    mul
+    push 400
+    div
+    push 16
+    swap
+    sub
+    abs
+    gstore 5          ; rx
+    gload 5
+    push 2
+    ge
+    jnz coin_wide
+    ; ребро
+    line 64 20 64 48 1
+    px 63 20 1
+    px 65 20 1
+    px 63 47 1
+    px 65 47 1
+    jmp coin_lbl
+coin_wide:
+    ; ell x y rx ry c: центр (64,34), rx=g5, ry=14
+    push 64
+    push 34
+    gload 5
+    push 14
+    push 1
+    ell
+    jmp coin_lbl
+
+coin_lbl:
+    ; статус
+    gload 0
+    push 1
+    eq
+    jnz lbl_flip
+    gload 1
+    jz lbl_h
+    text 52 52 1 s_tails
+    jmp counters
+lbl_h:
+    text 54 52 1 s_heads
+    jmp counters
+lbl_flip:
+    text 31 52 1 s_flip
+
+counters:
+    ; H:x T:y (внизу слева/справа)
+    text 2 52 1 s_h
+    gload 3
+    num 10 52 1
+    text 108 52 1 s_t
+    gload 4
+    num 118 52 1
+
+    disp
+    jmp main
+
+; (строки s_h/s_t — короткие метки)
+.str s_h H
+.str s_t T
