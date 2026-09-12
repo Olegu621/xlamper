@@ -1,123 +1,116 @@
-# Дизассемблер .xla — показ кода в удобочитаемом виде (для отладки)
+"""xla_disasm.py — дизассемблер XLA-байткода для C3 XLAMPER v0.12.
+
+Таблица опкодов — из gen_opcodes.py (единственный источник правды:
+src/xla_opcodes.h). Дизассемблер теперь знает ВСЕ опкоды VM,
+включая GCPY(0x49)/HTTPGET/DELAY/WGET, которых не знал дизассемблер
+v0.11 (помечал их как ?49, сбивая адресацию).
+
+Использование:
+    python xla_disasm.py app.xla            # весь код
+    python xla_disasm.py app.xla 100..200   # диапазон pc
+    python xla_disasm.py app.xla @123       # с pc=123 до конца
+"""
+import struct
 import sys
+from pathlib import Path
 
-OPN = {
-    0x00: "HALT",
-    0x01: "PUSH",
-    0x02: "DUP",
-    0x03: "DROP",
-    0x04: "SWAP",
-    0x05: "OVER",
-    0x06: "PICK",
-    0x20: "ADD",
-    0x21: "SUB",
-    0x22: "MUL",
-    0x23: "DIV",
-    0x24: "MOD",
-    0x25: "NEG",
-    0x26: "MIN",
-    0x27: "MAX",
-    0x28: "ABS",
-    0x30: "EQ",
-    0x31: "NE",
-    0x32: "LT",
-    0x33: "LE",
-    0x34: "GT",
-    0x35: "GE",
-    0x36: "AND",
-    0x37: "OR",
-    0x38: "XOR",
-    0x39: "NOT",
-    0x45: "GSTORE",
-    0x46: "GLOAD",
-    0x47: "GSTOREI",
-    0x48: "GLOADI",
-    0x50: "JMP",
-    0x51: "JZ",
-    0x52: "JNZ",
-    0x53: "CALL",
-    0x54: "RET",
-    0x5F: "FRAME",
-    0x60: "PX",
-    0x61: "LINE",
-    0x62: "RECT",
-    0x63: "FRECT",
-    0x64: "CIRC",
-    0x65: "FCIRC",
-    0x66: "ELL",
-    0x67: "TEXT",
-    0x68: "INV",
-    0x69: "FILL",
-    0x6A: "CLS",
-    0x6B: "DISP",
-    0x70: "MSEC",
-    0x71: "RAND",
-    0x72: "BEEP",
-    0x73: "EXIT",
-    0x74: "SAVE",
-    0x75: "LOAD",
-    0x76: "LOG",
-    0x77: "NUM",
-    0x80: "STX",
-    0x81: "STY",
-    0x82: "STICK",
-    0x83: "EVENT",
-    0x84: "HOLD",
-    0x90: "SIN",
-    0x91: "COS",
-    0x92: "SQRT",
-}
-IMM = {0x01, 0x45, 0x46, 0x50, 0x51, 0x52, 0x53, 0x67, 0x74, 0x75}
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gen_opcodes import KIND, NAMES  # noqa: E402
+
+JUMP_MNEMS = {"jmp", "jz", "jnz", "call"}
 
 
-def _parse_range(rng: str, code_len: int):
-    """Парсит диапазон 'from..to' / '@pc' / 'pc'; возвращает (lo, hi)."""
-    try:
-        if rng.startswith("@"):
-            c = int(rng[1:])
-            return max(0, c - 20), min(code_len, c + 20)
-        if ".." in rng:
-            a, b = rng.split("..")
-            return int(a), int(b)
-        if rng.isdigit():
-            c = int(rng)
-            return max(0, c - 20), min(code_len, c + 20)
-    except ValueError:
-        print(f"bad range {rng!r}, dumping all", file=sys.stderr)
-    return 0, code_len
+def load_bytes(blob: bytes) -> tuple[bytes, bytes, bytes, bytes, str]:
+    """Разбор XLA1-блоба из памяти: (code, data, pool, blob, title)."""
+    if blob[:4] != b"XLA1":
+        raise ValueError("не XLA1-файл")
+    code_sz = struct.unpack_from("<H", blob, 6)[0]
+    data_sz = struct.unpack_from("<H", blob, 8)[0]
+    str_sz = struct.unpack_from("<H", blob, 10)[0]
+    title_len = struct.unpack_from("<H", blob, 14)[0]
+    title = blob[16 : 16 + title_len].decode("utf-8", "replace")
+    off = 16 + title_len
+    code = blob[off : off + code_sz]
+    off += code_sz
+    data = blob[off : off + data_sz]
+    off += data_sz
+    pool = blob[off : off + str_sz]
+    if len(code) != code_sz:
+        raise ValueError("урезанный код")
+    return code, data, pool, blob, title
+
+
+def load(path: str) -> tuple[bytes, bytes, bytes, bytes, str]:
+    """Разбор XLA1-файла с диска."""
+    return load_bytes(Path(path).read_bytes())
+
+
+def pool_string_at(pool: bytes, off: int) -> str:
+    end = pool.find(b"\x00", off)
+    if end < 0:
+        end = len(pool)
+    return pool[off:end].decode("utf-8", "replace")
+
+
+def disasm(code: bytes, pool: bytes, start: int = 0, end: int | None = None) -> list[str]:
+    out = []
+    pc = start
+    stop = len(code) if end is None else min(end, len(code))
+    while pc < stop:
+        op = code[pc]
+        mnem = NAMES.get(op)
+        if mnem is None:
+            out.append(f"pc={pc:4d}: ?? 0x{op:02X}   ; НЕИЗВЕСТНЫЙ ОПКОД")
+            pc += 1
+            continue
+        kind = KIND[mnem.lower()]
+        if kind == "IMM16":
+            if pc + 3 > len(code):
+                out.append(f"pc={pc:4d}: {mnem} <урезан>")
+                break
+            v = struct.unpack_from("<h", code, pc + 1)[0]
+            if mnem.lower() in JUMP_MNEMS:
+                target = pc + 3 + v
+                out.append(f"pc={pc:4d}: {mnem:<8} -> pc {target}")
+            else:
+                out.append(f"pc={pc:4d}: {mnem:<8} {v}")
+            pc += 3
+        elif kind == "STR16":
+            if pc + 3 > len(code):
+                out.append(f"pc={pc:4d}: {mnem} <урезан>")
+                break
+            soff = struct.unpack_from("<H", code, pc + 1)[0]
+            s = pool_string_at(pool, soff) if soff < len(pool) else "<OOB>"
+            out.append(f"pc={pc:4d}: {mnem:<8} \"{s}\" (str@{soff})")
+            pc += 3
+        else:
+            out.append(f"pc={pc:4d}: {mnem}")
+            pc += 1
+    return out
 
 
 def main() -> None:
-    if len(sys.argv) < 3:
-        print("usage: python xla_disasm.py app.xla [from..to | @pc]")
+    if len(sys.argv) < 2:
+        print(__doc__)
         sys.exit(2)
     try:
-        with open(sys.argv[1], "rb") as fh:
-            blob = fh.read()
-    except OSError as exc:
-        print(f"cannot read: {exc}", file=sys.stderr)
+        code, data, pool, blob, title = load(sys.argv[1])
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
         sys.exit(1)
-    code_sz = blob[6] | (blob[7] << 8)
-    tl = blob[14] | (blob[15] << 8)
-    p = 16 + tl
-    code = blob[p : p + code_sz]
-    rng = sys.argv[2]
-    lo, hi = _parse_range(rng, len(code))
-    pc = 0
-    while pc < len(code):
-        start = pc
-        op = code[pc]
-        name = OPN.get(op, f"?{op:02X}")
-        if op in IMM:
-            v = code[pc + 1] | (code[pc + 2] << 8)
-            sv = v - 65536 if v >= 32768 else v
-            if lo <= start <= hi:
-                print(f"pc={start:4d}: {name} {sv}")
-            pc += 3
-        else:
-            if lo <= start <= hi:
-                print(f"pc={start:4d}: {name}")
-            pc += 1
+    start, end = 0, None
+    if len(sys.argv) == 3:
+        arg = sys.argv[2]
+        if arg.startswith("@"):
+            start = int(arg[1:], 0)
+        elif ".." in arg:
+            a, b = arg.split("..", 1)
+            start = int(a, 0) if a else 0
+            end = int(b, 0) if b else None
+    print(f"; {sys.argv[1]} ({len(blob)} B) title={title!r}")
+    print(f"; code={len(code)} B data={len(data)} B strings={len(pool)} B")
+    for line in disasm(code, pool, start, end):
+        print(line)
 
 
 if __name__ == "__main__":
