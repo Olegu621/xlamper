@@ -1,0 +1,50 @@
+TITLE: COIN
+' МОНЕТКА — первая игра на XLA BASIC.
+' Пишется в блокноте, качается с GitHub, работает. Без ассемблера.
+' OK (клик стика) — бросок, удержание — выход.
+
+SCORE best -> B
+
+loop:
+KEY -> K
+IF K == 5 THEN GOSUB flip
+CLS
+IF H == 1 THEN GOSUB drawHeads
+IF H == 0 THEN GOSUB drawTails
+IF H == 2 THEN GOSUB drawRoll
+TEXT 34 52 "H:"
+NUM 46 52 HN
+TEXT 66 52 "T:"
+NUM 78 52 TN
+DISP
+WAIT
+GOTO loop
+
+flip:
+BEEP 1200 30
+T = T + 1
+RND 2 -> H
+IF H == 1 THEN HN = HN + 1
+IF H == 0 THEN TN = TN + 1
+IF HN + TN > B THEN SCORE best HN + TN
+RETURN
+
+drawHeads:
+FCIRC 63 24 16 1
+CIRC 63 24 13 0
+CIRC 56 20 1 0
+CIRC 70 20 1 0
+LINE 58 29 68 29 0
+RETURN
+
+drawTails:
+FCIRC 63 24 16 1
+CIRC 63 24 13 0
+RECT 62 14 3 6 0
+RECT 62 26 3 6 0
+RETURN
+
+drawRoll:
+FCIRC 63 24 16 1
+CIRC 63 24 13 0
+RETURN
