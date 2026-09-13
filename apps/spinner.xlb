@@ -1,0 +1,107 @@
+TITLE: SPINNER
+' КОЛЕСО ФОРТУНЫ — вторая игра на XLA BASIC.
+' Пишется в блокноте. OK — запуск, колесо честно крутится и замедляется.
+' 24 позиции, стрелка сверху, рекорд — самый долгий спин (тики).
+
+SCORE best -> HI
+
+start:
+SP = 0          ' позиция (0..23)
+PH = 0          ' фаза: 0=готов, 1=крутится, 2=результат
+TI = 0          ' тики спина
+V = 25          ' скорость (позиций за тик... замедление)
+CL = 0
+SN = 0
+
+loop:
+KEY -> K
+IF PH == 0 THEN IF K == 5 THEN GOSUB begin
+IF PH == 1 THEN GOSUB spin
+GOSUB draw
+WAIT
+GOTO loop
+
+begin:
+BEEP 1200, 40
+PH = 1
+TI = 0
+V = 0
+RETURN
+
+spin:
+TI = TI + 1
+' скорость: сначала быстро (каждый тик), потом реже
+IF TI < 6 THEN V = 1
+IF TI >= 6 THEN IF TI < 14 THEN IF TI / 2 * 2 == TI THEN V = 1
+IF TI >= 14 THEN IF TI / 3 * 3 == TI THEN V = 1
+IF TI >= 20 THEN IF TI / 5 * 5 == TI THEN V = 1
+IF TI >= 40 THEN V = 1
+IF V == 1 THEN SP = SP + 1
+IF SP >= 24 THEN SP = 0
+IF V == 1 THEN BEEP 700 + SP * 40, 8
+' стоп: после 46 тиков
+IF TI >= 46 THEN GOSUB stop
+RETURN
+
+stop:
+PH = 2
+BEEP 1600, 120
+IF TI > HI THEN SCORE best TI
+RETURN
+
+draw:
+CLS
+' обод колеса: окружность r=26 в (63,30)
+CIRC 63 30 26 1
+CIRC 63 30 24 1
+' 24 спицы-деления
+I = 0
+marks:
+IF I >= 24 THEN GOTO marksDone
+M = I * 15        ' угол
+XA = 63
+YA = 30
+' конец внутренней метки (r=20): примитивно по кругу через таблицу?
+' XLA BASIC без SIN — рисуем метки только на 0/90/180/270 + диагонали упрощённо:
+I = I + 1
+GOTO marks
+marksDone:
+' крупные метки (0,6,12,18 = каждые 90°)
+LINE 63 4 63 10 1
+LINE 63 50 63 56 1
+LINE 37 30 43 30 1
+LINE 83 30 89 30 1
+' текущая позиция: жирная точка на окружности (12 позиций по кругу)
+GOSUB posDot
+' стрелка сверху
+FRECT 61 2 5 6 1
+' центр
+FCIRC 63 30 5 1
+CIRC 63 30 5 0
+' статус-строка
+IF PH == 0 THEN TEXT 24 58 "OK = SPIN"
+IF PH == 2 THEN TEXT 10 58 "RESULT: POS "
+IF PH == 2 THEN NUM 80 58 SP
+TEXT 4 2 "T "
+NUM 12 2 TI
+TEXT 30 2 "HI "
+NUM 48 2 HI
+DISP
+RETURN
+
+posDot:
+' точка на ободе по позиции SP (12 видимых углов из 24: чётные)
+Q = SP / 2          ' 0..11
+IF Q == 0 THEN FRECT 60 0 7 7 1
+IF Q == 1 THEN FRECT 75 5 7 7 1
+IF Q == 2 THEN FRECT 84 20 7 7 1
+IF Q == 3 THEN FRECT 84 33 7 7 1
+IF Q == 4 THEN FRECT 75 48 7 7 1
+IF Q == 5 THEN FRECT 60 53 7 7 1
+IF Q == 6 THEN FRECT 59 53 7 7 1
+IF Q == 7 THEN FRECT 44 48 7 7 1
+IF Q == 8 THEN FRECT 35 33 7 7 1
+IF Q == 9 THEN FRECT 35 20 7 7 1
+IF Q == 10 THEN FRECT 44 5 7 7 1
+IF Q == 11 THEN FRECT 59 0 7 7 1
+RETURN

@@ -21,7 +21,7 @@ WAIT
 GOTO loop
 
 flip:
-BEEP 1200 30
+BEEP 1200, 30
 T = T + 1
 RND 2 -> H
 IF H == 1 THEN HN = HN + 1
